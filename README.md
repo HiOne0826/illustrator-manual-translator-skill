@@ -31,6 +31,16 @@ ILLUSTRATOR_MANUAL_TRANSLATOR_ZIP_URL="https://example.com/illustrator-manual-tr
   bash install.sh
 ```
 
+如果继续使用私有 GitHub 仓库，需要给 `curl` 和安装脚本都传 GitHub token：
+
+```bash
+export GITHUB_TOKEN="github_pat_xxx"
+curl -fsSL \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh \
+  | GITHUB_TOKEN="$GITHUB_TOKEN" bash
+```
+
 默认安装到：
 
 ```text

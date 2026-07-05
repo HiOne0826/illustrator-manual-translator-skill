@@ -8,6 +8,16 @@
 curl -fsSL https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh | bash
 ```
 
+如果仓库是私有仓库，请使用带 GitHub token 的安装命令：
+
+```bash
+export GITHUB_TOKEN="github_pat_xxx"
+curl -fsSL \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh \
+  | GITHUB_TOKEN="$GITHUB_TOKEN" bash
+```
+
 安装完成后，用该 skill 处理我的 Adobe Illustrator 说明书文件：
 
 1. 先运行 `doctor` 检查本机环境。

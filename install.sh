@@ -7,6 +7,7 @@ DEFAULT_ZIP_URL="https://github.com/HiOne0826/illustrator-manual-translator-skil
 ZIP_URL="${ILLUSTRATOR_MANUAL_TRANSLATOR_ZIP_URL:-$DEFAULT_ZIP_URL}"
 TARGET_ROOT="${1:-${CODEX_HOME:-$HOME/.codex}/skills}"
 RUN_DOCTOR="${ILLUSTRATOR_MANUAL_TRANSLATOR_RUN_DOCTOR:-1}"
+GITHUB_AUTH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -29,7 +30,11 @@ mkdir -p "$TARGET_ROOT"
 
 echo "Downloading ${SKILL_NAME} from:"
 echo "$ZIP_URL"
-curl -fsSL "$ZIP_URL" -o "$TMP_DIR/$ZIP_NAME"
+if [ -n "$GITHUB_AUTH_TOKEN" ]; then
+  curl -H "Authorization: Bearer ${GITHUB_AUTH_TOKEN}" -fsSL "$ZIP_URL" -o "$TMP_DIR/$ZIP_NAME"
+else
+  curl -fsSL "$ZIP_URL" -o "$TMP_DIR/$ZIP_NAME"
+fi
 
 mkdir -p "$TMP_DIR/unpacked"
 unzip -q "$TMP_DIR/$ZIP_NAME" -d "$TMP_DIR/unpacked"
