@@ -21,7 +21,7 @@
 公开 GitHub Release 发布后，客户执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/illustrator-manual-translator-skill/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh | bash
 ```
 
 私有仓库或内网分发时，传入 zip 下载地址：
@@ -72,4 +72,3 @@ python3 "$HOME/.codex/skills/illustrator-manual-translator/scripts/illustrator_m
 ```
 
 如果未安装 Adobe Illustrator，`doctor` 会失败。这是正常的环境前置条件失败，不是 skill 包损坏。
-

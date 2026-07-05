@@ -3,7 +3,7 @@ set -euo pipefail
 
 SKILL_NAME="illustrator-manual-translator"
 ZIP_NAME="illustrator-manual-translator-skill.zip"
-DEFAULT_ZIP_URL="https://github.com/YOUR_ORG/illustrator-manual-translator-skill/releases/latest/download/${ZIP_NAME}"
+DEFAULT_ZIP_URL="https://github.com/HiOne0826/illustrator-manual-translator-skill/releases/latest/download/${ZIP_NAME}"
 ZIP_URL="${ILLUSTRATOR_MANUAL_TRANSLATOR_ZIP_URL:-$DEFAULT_ZIP_URL}"
 TARGET_ROOT="${1:-${CODEX_HOME:-$HOME/.codex}/skills}"
 RUN_DOCTOR="${ILLUSTRATOR_MANUAL_TRANSLATOR_RUN_DOCTOR:-1}"

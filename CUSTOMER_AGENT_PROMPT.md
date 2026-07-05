@@ -5,7 +5,7 @@
 先运行安装命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/illustrator-manual-translator-skill/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh | bash
 ```
 
 安装完成后，用该 skill 处理我的 Adobe Illustrator 说明书文件：
@@ -23,4 +23,3 @@ curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/illustrator-manual-transla
 - 只能直接替换 Illustrator `TextFrame` 活文字。
 - 转曲文字、路径对象、图片内文字需要记录为人工处理风险。
 - 版式溢出、缺字、旧文字残留必须在最终报告里说明。
-
