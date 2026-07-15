@@ -1,4 +1,4 @@
 interface:
-  display_name: "Illustrator Manual Translator"
-  short_description: "Translate and replace live text in Adobe Illustrator manuals."
-  default_prompt: "Use this skill to extract live TextFrame content from an Adobe Illustrator .ai manual, prepare translations, write translated text back into a copied .ai file, export PDF, and report unresolved outlined text or layout risks."
+  display_name: "Illustrator Manual Workflow"
+  short_description: "用 Excel 双确认生成多语种 Illustrator 说明书"
+  default_prompt: "Use $illustrator-manual-translator to extract this product specification, create the Chinese review Excel, wait for my confirmation, then translate, lay out, QA, and deliver AI/PDF files."

@@ -2,34 +2,20 @@
 
 请安装并使用 `illustrator-manual-translator` skill。
 
-先运行安装命令：
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh | bash
 ```
 
-如果仓库是私有仓库，请使用带 GitHub token 的安装命令：
+安装完成后，请使用这个 Skill 处理我提供的产品规格书和 Illustrator 说明书模板：
 
-```bash
-export GITHUB_TOKEN="github_pat_xxx"
-curl -fsSL \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/HiOne0826/illustrator-manual-translator-skill/main/install.sh \
-  | GITHUB_TOKEN="$GITHUB_TOKEN" bash
-```
+1. 抽取规格书与模板字段，生成 `说明书内容确认.xlsx`。
+2. 把 Excel 发给我；我只修改黄色的“最终中文”列。
+3. 在我明确回复“中文内容已确认”以前，不要进入翻译。
+4. 在同一个 Excel 中追加多语种翻译；我只修改黄色的“最终译文”列。
+5. 在我明确回复“翻译内容已确认”以前，不要进入排版。
+6. 调用 Illustrator 生成各语种 AI、PDF 和预览，执行溢出、版式、旧文字残留等校对。
+7. 把预览给我看；在我明确确认版式后，才整理最终交付文件。
 
-安装完成后，用该 skill 处理我的 Adobe Illustrator 说明书文件：
+Excel 中不要出现 `action`、`review_status`、通过、驳回或逐行审批字段。用户确认以对话中的整表确认消息为准。
 
-1. 先运行 `doctor` 检查本机环境。
-2. 对源 `.ai` 文件执行 `export`，导出 `textframes.json` 和 `textframes.md`。
-3. 用 `template` 生成目标语言翻译 JSON。
-4. 填充 `targetText` 后，用 `apply` 写入 `.ai` 副本，不要修改源文件。
-5. 导出 PDF 后执行 `verify`。
-6. 最后交付 `.ai` 副本、PDF、`replace-report.md` 和 `verify-report.md`。
-
-重要限制：
-
-- 不要直接覆盖源 `.ai` 文件。
-- 只能直接替换 Illustrator `TextFrame` 活文字。
-- 转曲文字、路径对象、图片内文字需要记录为人工处理风险。
-- 版式溢出、缺字、旧文字残留必须在最终报告里说明。
+始终复制源 `.ai` 后再处理，不得覆盖源文件。转曲文字、图片内文字、缺失模板映射或无法自动排版的区域必须明确报告。

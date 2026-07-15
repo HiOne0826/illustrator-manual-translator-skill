@@ -1,20 +1,22 @@
 # Illustrator Manual Translator Skill
 
-用于让支持 `SKILL.md` 目录的 agent 处理 Adobe Illustrator 说明书翻译工作流：
+用于让支持 `SKILL.md` 目录的 agent 通过文件和对话处理 Adobe Illustrator 多语种说明书：
 
-- 导出 `.ai` 文件里的 Illustrator `TextFrame` 活文字
-- 生成翻译 JSON 模板
-- 把译文写回 `.ai` 副本
-- 导出 PDF
-- 生成替换和验证报告
+- 规格书拆解后生成一份 `说明书内容确认.xlsx`
+- 用户先校准黄色的“最终中文”列并在对话中确认
+- 在同一 Excel 追加多语种翻译，用户校准“最终译文”后再确认
+- 不使用 `action`、`review_status` 或逐行审批字段
+- 确认后自动写入 `.ai` 副本、导出 PDF 并执行版式校对
+- 用户确认预览版式后才形成最终交付目录
 
 ## 客户侧前提
 
 - macOS
 - Adobe Illustrator 已安装并有合法授权
 - Python 3
+- 支持工作区文档能力的 Codex 运行时（提供 `@oai/artifact-tool`）
 - 终端或 agent 已被 macOS 允许控制 Adobe Illustrator
-- 可选：Poppler，用于更完整的 PDF 验证
+- Poppler（至少提供 `pdftoppm`），用于生成逐页 PDF 校对图
 
 ## 一条命令安装
 
@@ -78,7 +80,7 @@ dist/illustrator-manual-translator-skill.zip
 ## 安装后验证
 
 ```bash
-python3 "$HOME/.codex/skills/illustrator-manual-translator/scripts/illustrator_manual_workflow.py" doctor
+python3 "$HOME/.codex/skills/illustrator-manual-translator/scripts/manual_workflow.py" doctor
 ```
 
 如果未安装 Adobe Illustrator，`doctor` 会失败。这是正常的环境前置条件失败，不是 skill 包损坏。

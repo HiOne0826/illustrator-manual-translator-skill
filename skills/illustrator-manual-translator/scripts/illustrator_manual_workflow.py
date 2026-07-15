@@ -190,7 +190,6 @@ def command_template(args: argparse.Namespace) -> None:
                 "kind": item.get("kind", ""),
                 "fontName": item.get("fontName", ""),
                 "fontSize": item.get("fontSize", ""),
-                "reviewStatus": "pending",
             }
             for item in textframes
             if item.get("contents", "").strip()

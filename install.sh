@@ -106,7 +106,7 @@ cp -R "$SOURCE_DIR" "$TARGET_DIR"
 echo "Installed to $TARGET_DIR"
 
 if [ "$RUN_DOCTOR" = "1" ]; then
-  python3 "$TARGET_DIR/scripts/illustrator_manual_workflow.py" doctor
+  python3 "$TARGET_DIR/scripts/manual_workflow.py" doctor
 else
   echo "Skipped doctor check because ILLUSTRATOR_MANUAL_TRANSLATOR_RUN_DOCTOR=$RUN_DOCTOR"
 fi

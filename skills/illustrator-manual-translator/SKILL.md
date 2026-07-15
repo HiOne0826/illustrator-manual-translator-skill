@@ -1,96 +1,93 @@
 ---
 name: illustrator-manual-translator
-description: Extract, translate, replace, and verify live text in Adobe Illustrator `.ai` manuals using local Adobe Illustrator automation. Use when a user needs multilingual instruction manuals, product manuals, packaging docs, or other Illustrator files converted by reading TextFrame content, preparing translation tables, writing translations back into a copied `.ai`, exporting PDF, and reporting outlined text or layout risks.
+description: Turn product specifications and an Adobe Illustrator manual template into multilingual editable AI and PDF deliverables through a no-UI, file-based workflow. Use when the work requires AI extraction, one Excel workbook for Chinese and translation correction, explicit whole-file confirmation gates, Illustrator layout, and final QA.
 ---
 
 # Illustrator Manual Translator
 
-Use this skill when the deliverable should preserve an Illustrator-based manual workflow. Assume the customer machine has Adobe Illustrator installed and the agent can control local desktop apps.
+Run the customer workflow through files and chat. Do not start or require the repository web UI.
 
-## Core Rule
+## Non-Negotiable Rules
 
-Never modify the source `.ai` directly. Always export a TextFrame inventory first, prepare translations, then write into a copied `.ai` and exported PDF.
+- Never modify the source `.ai`; all rendering writes to project `preview/` and `delivery/`.
+- The customer edits one workbook named `说明书内容确认.xlsx`.
+- Do not add `action`, `review_status`, approval, pass, reject, or per-row decision columns.
+- Treat the workbook as corrected content, not an approval system.
+- Stop after creating the Chinese sheet. Continue only after the user explicitly confirms the Chinese content in chat.
+- Stop after appending the translation sheet. Continue only after the user explicitly confirms the translations in chat.
+- Never infer confirmation from the existence, save time, or hash of the workbook.
+- Preserve template body font sizes when layout rules specify `bodyFontSize: preserve-template`.
 
-## Standard Workflow
+## Project Command
 
-1. Check environment:
-
-```bash
-python3 scripts/illustrator_manual_workflow.py doctor
-```
-
-2. Export live Illustrator text:
-
-```bash
-python3 scripts/illustrator_manual_workflow.py export \
-  --source "/path/to/manual.ai" \
-  --out-dir "/path/to/output"
-```
-
-This creates:
-
-- `textframes.json`: machine-readable TextFrame inventory.
-- `textframes.md`: human-readable extraction table.
-
-3. Create translation template:
+Use `scripts/manual_workflow.py` for state, hashes, workbook validation, rendering, and delivery:
 
 ```bash
-python3 scripts/illustrator_manual_workflow.py template \
-  --textframes "/path/to/output/textframes.json" \
-  --out "/path/to/output/translations.zh-CN.json" \
-  --language zh-CN
+python3 scripts/manual_workflow.py <command> ...
 ```
 
-Fill only `targetText` values that should be replaced. Leave `targetText` empty to keep the original text.
+Before the first project, run `python3 scripts/manual_workflow.py doctor`. It must find the bundled extraction/Illustrator modules, Adobe Illustrator automation, and the Codex workspace `@oai/artifact-tool` runtime used to create and read Excel.
 
-4. Apply translations to a copy:
+Read `references/workflow.md` before running a customer project. Read `references/workbook-schema.md` before creating or interpreting the workbook.
 
-```bash
-python3 scripts/illustrator_manual_workflow.py apply \
-  --source "/path/to/manual.ai" \
-  --translations "/path/to/output/translations.zh-CN.json" \
-  --out-dir "/path/to/output" \
-  --name "manual-zh-CN" \
-  --font "PingFangSC-Regular"
+## AI Content Tasks
+
+The script deliberately does not call a fixed model provider. The agent running this Skill performs two bounded AI tasks.
+
+### Generate Chinese rows
+
+After `init`, read `work/content-generation-input.json`. Write a JSON file containing exactly one row for every `templateFields[].fieldId`:
+
+```json
+{
+  "rows": [
+    {
+      "fieldId": "textframe_12",
+      "fieldName": "额定功率",
+      "sourceEvidence": "规格书表 2：额定功率 45 W",
+      "aiChinese": "额定功率：45 W",
+      "required": true,
+      "protectedTokens": ["45 W"]
+    }
+  ]
+}
 ```
 
-This creates:
+Use only evidence in `canonicalProduct`. Do not invent missing facts. Keep model numbers, units, certifications, URLs, and legal names in `protectedTokens`. An inapplicable optional field may have empty `aiChinese`.
 
-- `manual-zh-CN.ai`: copied Illustrator file with replaced TextFrames.
-- `manual-zh-CN.pdf`: exported PDF.
-- `replace-report.md`: replacement summary.
+### Generate translation rows
 
-5. Verify PDF:
+Only after explicit Chinese confirmation, read `work/translation-generation-input.json`. Write every `fieldId × language` combination:
 
-```bash
-python3 scripts/illustrator_manual_workflow.py verify \
-  --pdf "/path/to/output/manual-zh-CN.pdf" \
-  --out-dir "/path/to/output/verify"
+```json
+{
+  "rows": [
+    {
+      "fieldId": "textframe_12",
+      "language": "en-US",
+      "aiTranslation": "Rated power: 45 W"
+    }
+  ]
+}
 ```
 
-Review rendered PNGs and `verify-report.md` before calling the result acceptable.
+Translate only `finalChinese`. Empty Chinese remains empty. Preserve protected terms and quantities.
 
-## Decision Points
+## Confirmation Semantics
 
-- If important visible text is missing from `textframes.json`, treat it as outlined/path text or a complex object. Do not claim it was replaced.
-- If the user requires editable `.ai` output, use the Illustrator TextFrame route first.
-- If the user only needs a visual PDF and Illustrator automation fails, fall back to PDF-compatible AI visual replacement.
-- If text is outlined, choose one: ask a designer to restore live text, overlay a new TextFrame, or rebuild that region in a template system.
+The user may freely correct the yellow final-content column, including correcting a model number or quantity proposed by AI. After the user explicitly confirms, run the matching `confirm-*` command. The commands validate stable IDs, read-only columns, template-required content, source hashes, and the full expected row set. Translation confirmation also verifies numbers, units, and model-like tokens derived from the confirmed Chinese.
 
-## Quality Gates
+If validation fails, explain the affected Excel row and ask the user to correct the workbook. Do not bypass the check and do not add a status field.
 
-Before delivery, confirm:
+## Layout And Delivery
 
-- Source `.ai` remained unchanged.
-- Output `.ai` and `.pdf` exist.
-- PDF page count and size match the source.
-- Translated text is extractable from the PDF text layer.
-- Rendered pages show no obvious missing glyphs, overflow, or old visible text.
-- `replace-report.md` lists changed TextFrame indexes.
-- Untranslated visible text is either intentionally preserved or logged as outlined/path text.
+Run `render` only after translation confirmation. Blocking layout issues keep the project blocked. Show the generated PDF/page previews to the user and wait for an explicit layout confirmation before `confirm-layout` copies `.ai`, `.pdf`, QA JSON, and page previews into `delivery/`.
+
+Use `--no-execute` only to inspect generated JSX. A dry run must not advance the project to layout confirmation.
 
 ## References
 
-- Read `references/workflow.md` when implementing an end-to-end customer workflow.
-- Read `references/translation-schema.md` when preparing or validating translation JSON.
-- Read `references/limitations.md` when diagnosing missing text, outlined text, font problems, or layout drift.
+- `references/workflow.md`: exact command sequence and stop points.
+- `references/workbook-schema.md`: customer-visible workbook contract and validation rules.
+- `references/translation-schema.md`: AI-only JSON inputs and outputs.
+- `references/limitations.md`: Illustrator, font, outlined-text, and template risks.

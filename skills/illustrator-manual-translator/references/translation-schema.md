@@ -1,52 +1,34 @@
-# Translation JSON Schema
+# AI Exchange JSON
 
-The `template` command creates a JSON file:
+These JSON files are internal exchanges between the Skill agent and `manual_workflow.py`. Customers edit only Excel.
 
-```json
-{
-  "sourceTextframes": "/path/to/textframes.json",
-  "targetLanguage": "zh-CN",
-  "notes": "Fill targetText for text that should be replaced. Leave targetText empty to keep original text.",
-  "items": [
-    {
-      "index": 0,
-      "sourceText": "User Manual",
-      "targetText": "用户手册",
-      "kind": "POINTTEXT",
-      "fontName": "Arial-BoldMT",
-      "fontSize": "17",
-      "reviewStatus": "approved"
-    }
-  ]
-}
-```
+## Chinese Generation
 
-## Required Fields
+Input: `work/content-generation-input.json`.
 
-- `index`: Illustrator `doc.textFrames[index]`.
-- `targetText`: replacement text. Empty means keep original.
+Output row fields:
 
-## Recommended Review Status
+- `fieldId`: exact ID from `templateFields`; required and unique.
+- `fieldName`: customer-facing Chinese label.
+- `sourceEvidence`: concise, traceable specification evidence.
+- `aiChinese`: Chinese content to place in the template.
+- `required`: whether empty content is forbidden.
+- `protectedTokens`: exact text that must survive correction and translation.
 
-- `pending`: not reviewed.
-- `approved`: okay to write back.
-- `keep-original`: intentionally leave empty.
-- `needs-design`: translation likely needs layout adjustment.
-- `outlined-text`: visible text was not found in TextFrames.
+Every template field must appear exactly once. There is no review or action field.
 
-## Protected Terms
+## Translation Generation
 
-Do not translate unless the customer says otherwise:
+Input: `work/translation-generation-input.json`, created only from confirmed `finalChinese`.
 
-- Brand names.
-- Product model numbers.
-- Certifications.
-- Units and dimensions.
-- Phone numbers.
-- URLs and emails.
-- Legal entity names when used as official contact info.
+Output row fields:
+
+- `fieldId`: exact confirmed Chinese field ID.
+- `language`: exact requested locale.
+- `aiTranslation`: translation of `finalChinese` only.
+
+Every field/language pair must appear exactly once. Empty confirmed Chinese must produce empty translation. There is no review or approval field.
 
 ## Stable Matching
 
-Indexes are stable for one file revision but may change if the `.ai` is edited. For production, also keep `sourceText`, `geometricBounds`, and page/region hints so a human or agent can detect index drift.
-
+`fieldId` is tied to one template revision. The workflow also hashes the copied source AI and specifications. If an input changes, do not reuse old confirmation JSON or Excel.
