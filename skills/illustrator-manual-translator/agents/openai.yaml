@@ -1,4 +1,4 @@
 interface:
   display_name: "Illustrator Manual Workflow"
-  short_description: "用 Excel 双确认生成多语种 Illustrator 说明书"
+  short_description: "通过整表内容、图片和版式确认生成多语种 Illustrator 说明书"
   default_prompt: "Use $illustrator-manual-translator to extract this product specification, create the Chinese review Excel, wait for my confirmation, then translate, lay out, QA, and deliver AI/PDF files."

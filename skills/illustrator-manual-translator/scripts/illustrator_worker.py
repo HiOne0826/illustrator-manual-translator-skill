@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import http.client
 import json
@@ -12,31 +13,37 @@ import platform
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
 APP_BUNDLE_ID = "com.adobe.illustrator"
-APP_SCRIPT_NAME = "Adobe Illustrator"
 TEMPLATE_SCHEMA = "illustrator-template/v2"
-WORKER_VERSION = "2.0"
+DRIVER_PROTOCOL = "illustrator-driver/v1"
+WORKER_RESULT_SCHEMA = "illustrator-worker-result/v1"
+WORKER_VERSION = "2.1"
 DEFAULT_TIMEOUT = 30.0
 CODEX_RUNTIME_BIN = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override"
 
 
 class WorkerError(RuntimeError):
     """A user-facing worker, automation, or protocol failure."""
+
+
+class IndeterminateWorkerError(WorkerError):
+    """The wrapper stopped, but Illustrator may still be executing."""
 
 
 def find_binary(name: str) -> str | None:
@@ -81,11 +88,126 @@ def validate_source(source: Path) -> None:
         raise WorkerError(f"Unsupported Illustrator source type: {source.suffix or '<none>'}")
 
 
-def validate_output(source: Path, output: Path, *, overwrite: bool = False) -> None:
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def validate_output(source: Path, output: Path, *, overwrite: bool = False, allowed_root: Path | None = None) -> None:
     if source.resolve() == output.resolve():
         raise WorkerError(f"Refusing to overwrite source file: {source}")
+    if allowed_root is not None and not path_is_within(output, allowed_root):
+        raise WorkerError(f"Output escapes allowed root {allowed_root}: {output}")
+    if output.parent.is_symlink():
+        raise WorkerError(f"Output parent must not be a symlink: {output.parent}")
     if output.exists() and not overwrite:
         raise WorkerError(f"Output already exists (set overwrite=true to replace it): {output}")
+
+
+def raster_dimensions(path: Path) -> tuple[int, int] | None:
+    """Read common raster dimensions without adding an imaging dependency."""
+    suffix = path.suffix.lower()
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+            if suffix == ".png" and header.startswith(b"\x89PNG\r\n\x1a\n"):
+                return struct.unpack(">II", header[16:24])
+            if suffix == ".gif" and header[:6] in {b"GIF87a", b"GIF89a"}:
+                return struct.unpack("<HH", header[6:10])
+            if suffix == ".bmp" and header.startswith(b"BM"):
+                width, height = struct.unpack("<ii", header[18:26])
+                return abs(width), abs(height)
+            if suffix in {".jpg", ".jpeg"} and header.startswith(b"\xff\xd8"):
+                handle.seek(2)
+                while True:
+                    marker_start = handle.read(1)
+                    if not marker_start:
+                        break
+                    if marker_start != b"\xff":
+                        continue
+                    marker = handle.read(1)
+                    while marker == b"\xff":
+                        marker = handle.read(1)
+                    if marker in {b"\xd8", b"\xd9"}:
+                        continue
+                    length_bytes = handle.read(2)
+                    if len(length_bytes) != 2:
+                        break
+                    segment_length = struct.unpack(">H", length_bytes)[0]
+                    if marker and marker[0] in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                        payload = handle.read(5)
+                        if len(payload) == 5:
+                            height, width = struct.unpack(">HH", payload[1:5])
+                            return width, height
+                        break
+                    handle.seek(max(0, segment_length - 2), os.SEEK_CUR)
+    except (OSError, struct.error, ValueError):
+        return None
+    return None
+
+
+def asset_dpi_issue(binding: Mapping[str, Any], path: Path) -> dict[str, Any] | None:
+    minimum = float(binding.get("minDpi") or 0)
+    if minimum <= 0 or str(binding.get("fit") or "contain") == "hide":
+        return None
+    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".bmp"}:
+        return None
+    width = int(binding.get("width") or 0)
+    height = int(binding.get("height") or 0)
+    if width <= 0 or height <= 0:
+        dimensions = raster_dimensions(path)
+        if dimensions:
+            width, height = dimensions
+    slot = binding.get("bounds") or []
+    if width <= 0 or height <= 0 or not isinstance(slot, Sequence) or len(slot) != 4:
+        return {
+            "level": "blocking",
+            "type": "asset_dpi_unavailable",
+            "message": f"Cannot verify effective DPI for asset slot {binding.get('slotId')}",
+            "status": "open",
+        }
+    slot_width = abs(float(slot[2]) - float(slot[0]))
+    slot_height = abs(float(slot[1]) - float(slot[3]))
+    if slot_width <= 0 or slot_height <= 0:
+        raise WorkerError(f"Asset slot {binding.get('slotId')} has invalid bounds")
+    fit = str(binding.get("fit") or "contain")
+    scale_x = slot_width / width
+    scale_y = slot_height / height
+    if fit == "contain":
+        points_per_pixel = min(scale_x, scale_y)
+    elif fit == "cover":
+        points_per_pixel = max(scale_x, scale_y)
+    else:
+        points_per_pixel = max(scale_x, scale_y)
+    effective = 72.0 / points_per_pixel
+    if effective + 0.01 < minimum:
+        return {
+            "level": "blocking",
+            "type": "asset_low_dpi",
+            "message": f"Asset slot {binding.get('slotId')} effective DPI {effective:.1f} is below {minimum:.0f}",
+            "status": "open",
+            "metadata": {"effectiveDpi": round(effective, 1), "minimumDpi": minimum, "pixels": [width, height]},
+        }
+    return None
+
+
+def qa_quality_issues(qa_data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    mappings = (
+        ("oversetTextFrames", "blocking", "text_overflow", "Overset TextFrames"),
+        ("outOfSafeBoundsDetails", "blocking", "text_out_of_safe_bounds", "Text outside safe bounds"),
+        ("layoutViolations", "blocking", "layout_rule_violation", "Layout rule violations"),
+        ("unresolvedNamedObjects", "warning", "layout_binding_missing", "Unresolved named objects"),
+        ("fontFallbacks", "blocking", "font_fallback", "Configured fonts were unavailable"),
+        ("continuationRequests", "blocking", "layout_continuation_required", "New artboard required"),
+    )
+    for key, level, issue_type, label in mappings:
+        if qa_data.get(key):
+            issues.append({"level": level, "type": issue_type, "message": f"{label}: {qa_data[key]}", "status": "open"})
+    return issues
 
 
 def find_illustrator_app() -> Path | None:
@@ -108,8 +230,123 @@ def _run(
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        seconds = timeout if timeout is not None else "unknown"
+        raise IndeterminateWorkerError(f"Command timed out after {seconds}s; Illustrator state is unknown") from exc
+    except OSError as exc:
         raise WorkerError(f"Command failed to start: {' '.join(command)}: {exc}") from exc
+
+
+class IllustratorDriver:
+    """Thin execution boundary; rendering and QA stay in the worker."""
+
+    driver_id = "unknown"
+
+    def execute_jsx(self, jsx_path: Path, *, timeout: float = 600.0) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def doctor(self, *, probe: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class AppleScriptDriver(IllustratorDriver):
+    """macOS-only Illustrator automation through Apple Events."""
+
+    driver_id = "macos-osascript"
+
+    def __init__(
+        self,
+        *,
+        system: str | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        self.system = system or platform.system()
+        self.runner = runner
+
+    def _command(self, jsx_path: Path) -> list[str]:
+        if self.system != "Darwin":
+            raise WorkerError(f"Illustrator automation requires macOS; current platform is {self.system}")
+        osascript = shutil.which("osascript")
+        if not osascript:
+            raise WorkerError("osascript not found; macOS Illustrator automation is unavailable")
+        return [
+            osascript,
+            "-e",
+            f'tell application id "{APP_BUNDLE_ID}" to do javascript POSIX file {jsx_string(jsx_path)}',
+        ]
+
+    def execute_jsx(self, jsx_path: Path, *, timeout: float = 600.0) -> dict[str, Any]:
+        resolved = resolve_path(jsx_path)
+        if not resolved.is_file() or resolved.suffix.lower() != ".jsx":
+            raise WorkerError(f"JSX file not found or invalid: {resolved}")
+        command = self._command(resolved)
+        started = time.monotonic()
+        result = _run(command, timeout=timeout, runner=self.runner)
+        duration_ms = round((time.monotonic() - started) * 1000)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+            raise WorkerError(f"Illustrator JSX execution failed (exit {result.returncode}): {details}")
+        return {
+            "command": command,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "durationMs": duration_ms,
+            "driver": {"id": self.driver_id, "protocolVersion": DRIVER_PROTOCOL},
+        }
+
+    def doctor(self, *, probe: bool = False) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "ok": False,
+            "driver": {"id": self.driver_id, "protocolVersion": DRIVER_PROTOCOL},
+            "installed": False,
+            "automationAvailable": False,
+            "checks": {},
+        }
+        checks = report["checks"]
+        if self.system != "Darwin":
+            checks["error"] = f"macOS is required; current platform is {self.system}"
+            return report
+        app = find_illustrator_app()
+        osascript = shutil.which("osascript")
+        checks.update({"illustratorApp": str(app) if app else None, "osascript": osascript})
+        report["installed"] = bool(app)
+        report["automationAvailable"] = bool(osascript)
+        report["ok"] = bool(app and osascript)
+        if probe and report["ok"]:
+            with tempfile.TemporaryDirectory(prefix="illustrator-doctor-") as temp:
+                probe_jsx = Path(temp) / "probe.jsx"
+                probe_jsx.write_text('#target illustrator\n(function () { return "illustrator:" + app.version; }());\n', encoding="utf-8")
+                try:
+                    result = self.execute_jsx(probe_jsx, timeout=30)
+                    checks["automationProbe"] = {
+                        "ok": True,
+                        "result": result.get("stdout") or None,
+                        "durationMs": result.get("durationMs"),
+                    }
+                except WorkerError as exc:
+                    checks["automationProbe"] = {"ok": False, "error": str(exc)}
+                    report["ok"] = False
+        return report
+
+
+def default_driver(
+    *,
+    system: str | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> IllustratorDriver:
+    return AppleScriptDriver(system=system, runner=runner)
+
+
+@contextmanager
+def illustrator_execution_lock() -> Any:
+    """Serialize all local Illustrator mutations across projects and workers."""
+    lock_path = Path(tempfile.gettempdir()) / "illustrator-manual-translator.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def run_jsx(
@@ -118,45 +355,12 @@ def run_jsx(
     system: str | None = None,
     timeout: float = 600.0,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    driver: IllustratorDriver | None = None,
 ) -> dict[str, Any]:
-    """Execute JSX through Apple Events or the Windows COM probe."""
-    current_system = system or platform.system()
-    if current_system == "Darwin":
-        osascript = shutil.which("osascript")
-        if not osascript:
-            raise WorkerError("osascript not found; macOS Illustrator automation is unavailable")
-        command = [
-            osascript,
-            "-e",
-            f'tell application "{APP_SCRIPT_NAME}" to do javascript POSIX file {jsx_string(jsx_path)}',
-        ]
-    elif current_system == "Windows":
-        powershell = shutil.which("pwsh") or shutil.which("powershell")
-        probe = Path(__file__).with_name("windows_vm_probe.ps1")
-        if not powershell:
-            raise WorkerError("PowerShell not found; Windows Illustrator COM automation is unavailable")
-        if not probe.is_file():
-            raise WorkerError(f"Windows probe script not found: {probe}")
-        command = [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(probe),
-            "-Json",
-            "-ExecuteJsx",
-            "-JsxPath",
-            str(jsx_path),
-        ]
-    else:
-        raise WorkerError(f"Illustrator automation is unsupported on {current_system}")
-
-    result = _run(command, timeout=timeout, runner=runner)
-    if result.returncode != 0:
-        details = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
-        raise WorkerError(f"Illustrator JSX execution failed (exit {result.returncode}): {details}")
-    return {"command": command, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
+    """Execute a generated JSX file through the selected macOS driver."""
+    selected = driver or default_driver(system=system, runner=runner)
+    with illustrator_execution_lock():
+        return selected.execute_jsx(jsx_path, timeout=timeout)
 
 
 def write_jsx(content: str, directory: Path, prefix: str) -> Path:
@@ -264,10 +468,19 @@ def build_extract_template_jsx(source: Path, output: Path, preview: Path, source
       if (lpParentType !== "Layer") continue;
       var lpb = lpi.geometricBounds;
       var lpWidth = Number(lpb[2]) - Number(lpb[0]), lpHeight = Number(lpb[1]) - Number(lpb[3]);
-      if (lpWidth < 250 || lpHeight < 20 || lpHeight > 150) continue;
+      if (lpWidth < 80 || lpHeight < 20 || lpHeight > 180) continue;
       try {{ lpParentName = lpi.parent && lpi.parent.name ? lpi.parent.name : ""; }} catch (lpParentNameError) {{}}
       layoutPathItems.push('{{' + itemBase(lpi, lp) + ',"parentType":' + q(lpParentType) +
         ',"parentName":' + q(lpParentName) + '}}');
+    }}
+    var compoundPathItems = [];
+    for (var cp = 0; cp < doc.compoundPathItems.length; cp += 1) {{
+      var cpi = doc.compoundPathItems[cp], cpParentType = "", cpParentName = "";
+      try {{ cpParentType = cpi.parent ? cpi.parent.typename : ""; }} catch (cpParentTypeError) {{}}
+      if (cpParentType !== "Layer") continue;
+      try {{ cpParentName = cpi.parent && cpi.parent.name ? cpi.parent.name : ""; }} catch (cpParentNameError) {{}}
+      compoundPathItems.push('{{' + itemBase(cpi, cp) + ',"parentType":' + q(cpParentType) +
+        ',"parentName":' + q(cpParentName) + '}}');
     }}
 
     var previewError = "", previewItems = [];
@@ -296,6 +509,7 @@ def build_extract_template_jsx(source: Path, output: Path, preview: Path, source
       ',"placedItems":[' + placedItems.join(",") + ']' +
       ',"rasterItems":[' + rasterItems.join(",") + ']' +
       ',"groupItems":[' + groupItems.join(",") + ']' +
+      ',"compoundPathItems":[' + compoundPathItems.join(",") + ']' +
       ',"layoutPathItems":[' + layoutPathItems.join(",") + ']' +
       ',"preview":{{"path":' + (previewItems.length ? q(previewPath.replace(/\.png$/i, "-1.png")) : q(previewPath)) +
       ',"format":"png","scalePercent":50,"exists":' + bool(previewItems.length > 0) +
@@ -315,6 +529,7 @@ def extract_template(
     execute: bool = True,
     overwrite: bool = False,
     system: str | None = None,
+    driver: IllustratorDriver | None = None,
 ) -> dict[str, Any]:
     source_path = resolve_path(source)
     validate_source(source_path)
@@ -327,11 +542,17 @@ def extract_template(
     jsx_path = write_jsx(build_extract_template_jsx(source_path, output, preview, source_metadata(source_path)), directory, "extract-template-")
     result: dict[str, Any] = {"jsx": str(jsx_path), "template": str(output), "preview": str(preview), "executed": False}
     if execute:
-        result["automation"] = run_jsx(jsx_path, system=system)
+        result["automation"] = run_jsx(jsx_path, system=system, driver=driver)
         result["executed"] = True
         if not output.is_file():
             raise WorkerError(f"Illustrator completed without creating template metadata: {output}")
         result["metadata"] = json.loads(output.read_text(encoding="utf-8-sig"))
+        artifacts = [{"type": "template_metadata", "path": str(output), "sha256": source_metadata(output)["sha256"], "metadata": {"bytes": output.stat().st_size}}]
+        for item in (result["metadata"].get("preview") or {}).get("pages") or []:
+            page = Path(str(item.get("path") or ""))
+            if page.is_file():
+                artifacts.append({"type": "template_preview", "path": str(page), "sha256": source_metadata(page)["sha256"], "metadata": {"bytes": page.stat().st_size, "artboard": item.get("artboard")}})
+        result["artifacts"] = artifacts
     return result
 
 
@@ -375,6 +596,7 @@ def _job_guards(job: Mapping[str, Any]) -> dict[int, dict[str, Any]]:
                 "expectedSourceText": item.get("expectedSourceText"),
                 "bounds": item.get("bounds"),
                 "slotId": item.get("slotId"),
+                "locator": item.get("locator") or {},
             }
     return guards
 
@@ -425,7 +647,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
   }}
   function collectPreservedBodyFontIndexes() {{
     var result = {{}}, policy = layoutRules && layoutRules.typographyPolicy ? layoutRules.typographyPolicy : {{}};
-    if (policy.bodyFontSize !== "preserve-template") return result;
+    if (policy.bodyFontSize !== "preserve-template" && policy.bodyFontSize !== "fixed-template-standard") return result;
     var pages = layoutRules && layoutRules.pages ? layoutRules.pages : [];
     for (var p = 0; p < pages.length; p += 1) {{
       var regions = pages[p].regions || [];
@@ -440,7 +662,33 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     return result;
   }}
   function bodyFontIsLocked(index) {{ return preservedBodyFontIndexes[String(Number(index))] === true; }}
+  function applyBodyTypographyToFrame(frame, behavior, label, adjustments) {{
+    var policy = layoutRules && layoutRules.typographyPolicy ? layoutRules.typographyPolicy : {{}}, options = behavior || {{}};
+    var fixed = policy.bodyFontSize === "fixed-template-standard";
+    var size = Number(options.bodyFontSizePt || (fixed ? policy.bodyFontSizePt : 0));
+    var leading = Number(options.bodyLeadingPt || (fixed ? policy.bodyLeadingPt : 0));
+    try {{
+      if (size > 0) frame.textRange.characterAttributes.size = size;
+      if (leading > 0) frame.textRange.characterAttributes.leading = leading;
+      if (size > 0 || leading > 0) adjustments.push(label + ":typography-" + (size || "template") + "pt-" + (leading || "auto") + "leading");
+    }} catch (typographyError) {{}}
+  }}
+  function applyStandardBodyTypography(adjustments) {{
+    var pages = layoutRules && layoutRules.pages ? layoutRules.pages : [];
+    for (var p = 0; p < pages.length; p += 1) {{
+      var regions = pages[p].regions || [];
+      for (var r = 0; r < regions.length; r += 1) {{
+        var behavior = regions[r].behavior || {{}}, refs = refsByType(regions[r], "textFrame"), positions = behavior.bodyTextFramePositions || [];
+        for (var i = 0; i < positions.length; i += 1) {{
+          var position = Number(positions[i]);
+          if (position >= 0 && position < refs.length) applyBodyTypographyToFrame(textAt(Number(refs[position])), behavior, regions[r].id + "-body", adjustments);
+        }}
+      }}
+    }}
+  }}
   function restoreTemplateBodyFontSizes(adjustments) {{
+    var policy = layoutRules && layoutRules.typographyPolicy ? layoutRules.typographyPolicy : {{}};
+    if (policy.bodyFontSize !== "preserve-template") return;
     for (var key in templateBodyFontSizes) {{
       if (!templateBodyFontSizes.hasOwnProperty(key)) continue;
       var index = Number(key), expected = Number(templateBodyFontSizes[key]);
@@ -519,25 +767,65 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var originalText = String(frame.contents || ""), size = Number(attrs.size || 12);
     if (maxLines === 1) frame.contents = normalize(originalText).replace(/\\n/g, " ");
     else if (maxLines === 2 && lineCount(originalText) === 1) frame.contents = wrapAtHalf(originalText);
+    try {{ app.redraw(); }} catch (redrawError) {{}}
+    attrs = frame.textRange.characterAttributes;
+    size = Number(attrs.size || size || 12);
     if (size < minSize) {{ attrs.size = minSize; size = minSize; adjustments.push(label + ":font-raised-to-" + minSize); }}
-    var width = Number(frame.geometricBounds[2]) - Number(frame.geometricBounds[0]);
+    function measuredWidth() {{
+      var geometric = Number(frame.geometricBounds[2]) - Number(frame.geometricBounds[0]);
+      var scale = 100;
+      try {{ scale = Number(attrs.horizontalScale || 100); }} catch (measureScaleError) {{}}
+      var parts = String(frame.contents || "").replace(/\\n/g, "\\r").split("\\r"), longest = 0;
+      for (var partIndex = 0; partIndex < parts.length; partIndex += 1) longest = Math.max(longest, compactLength(parts[partIndex]));
+      return Math.max(geometric, longest * size * 0.66 * scale / 100);
+    }}
+    var width = measuredWidth();
     while (width > maxWidth + 0.5 && size > minSize) {{
       size = Math.max(minSize, size - 0.5); attrs.size = size;
-      width = Number(frame.geometricBounds[2]) - Number(frame.geometricBounds[0]);
+      try {{ app.redraw(); }} catch (redrawSizeError) {{}}
+      width = measuredWidth();
     }}
     var minHorizontalScale = Number(options.titleMinHorizontalScale || 70), horizontalScale = 100;
     try {{ horizontalScale = Number(attrs.horizontalScale || 100); }} catch (scaleReadError) {{}}
     while (width > maxWidth + 0.5 && horizontalScale > minHorizontalScale) {{
       horizontalScale = Math.max(minHorizontalScale, horizontalScale - 1);
       try {{ attrs.horizontalScale = horizontalScale; }} catch (scaleWriteError) {{ break; }}
-      width = Number(frame.geometricBounds[2]) - Number(frame.geometricBounds[0]);
+      try {{ app.redraw(); }} catch (redrawScaleError) {{}}
+      width = measuredWidth();
     }}
     if (horizontalScale < 99.5) adjustments.push(label + ":horizontal-scale-" + horizontalScale);
     if (width > maxWidth + 0.5 && options.titleAllowWrap && maxLines > 1 && lineCount(frame.contents) === 1) {{ frame.contents = wrapAtHalf(frame.contents); adjustments.push(label + ":wrapped-after-horizontal-scale"); }}
-    width = Number(frame.geometricBounds[2]) - Number(frame.geometricBounds[0]);
+    width = measuredWidth();
     if (String(frame.contents) !== originalText) adjustments.push(label + ":wrapped");
     if (width > maxWidth + 0.5) violations.push(label + ":width-overflow");
     if (lineCount(frame.contents) > maxLines) violations.push(label + ":line-limit");
+  }}
+  function fitCoverBrandHeader(region, adjustments, violations) {{
+    var refs = refsByType(region, "textFrame"), behavior = region.behavior || {{}};
+    if (!refs.length) {{ violations.push(region.id + ":missing-brand-copy"); return; }}
+    var index = Number(refs[0]), frame = textAt(index), rightLimit = Number(behavior.maxRightPt || 400);
+    var maxWidth = rightLimit - Number(frame.geometricBounds[0]), wrapped = false;
+    try {{ app.redraw(); }} catch (redrawError) {{}}
+    if (Number(frame.geometricBounds[2]) > rightLimit + 0.5 && Number(behavior.maxLines || 1) > 1 && lineCount(frame.contents) === 1) {{
+      frame.contents = wrapAtHalf(frame.contents); wrapped = true;
+      adjustments.push(region.id + ":wrapped-to-fit-back-cover");
+    }}
+    if (wrapped) {{
+      try {{ frame.textRange.characterAttributes.size = Math.min(Number(frame.textRange.characterAttributes.size || 18), Number(behavior.wrappedFontSizePt || 14.5)); }} catch (wrappedSizeError) {{}}
+    }}
+    fitPointText(index, wrapped ? Number(behavior.maxLines || 2) : 1, Number(behavior.minFontSizePt || 14), maxWidth, region.id, adjustments, violations, {{titleMinHorizontalScale:Number(behavior.minHorizontalScale || 85)}});
+    try {{
+      frame.textRange.characterAttributes.leading = Number(frame.textRange.characterAttributes.size || 14) * 1.08; app.redraw();
+      var bottomLimit = Number(behavior.maxBottomPt || -102), currentBottom = Number(frame.geometricBounds[3]);
+      if (currentBottom < bottomLimit) {{ frame.translate(0, bottomLimit - currentBottom); adjustments.push(region.id + ":moved-up-inside-header"); app.redraw(); }}
+      try {{ frame.textRange.paragraphAttributes.justification = Justification.CENTER; }} catch (alignmentError) {{}}
+      app.redraw();
+      var headerLeft = Number(behavior.headerLeftPt || 0), headerRight = Number(behavior.headerRightPt || 420.9449), centeredBounds = frame.geometricBounds;
+      var frameCenter = (Number(centeredBounds[0]) + Number(centeredBounds[2])) / 2, headerCenter = (headerLeft + headerRight) / 2;
+      frame.translate(headerCenter - frameCenter, 0); app.redraw();
+      adjustments.push(region.id + ":centered-in-back-cover-header");
+    }} catch (leadingError) {{}}
+    if (Number(frame.geometricBounds[2]) > rightLimit + 0.5) violations.push(region.id + ":crosses-cover-spine");
   }}
   function estimatedWrappedLines(value, width, fontSize) {{
     var paragraphs = String(value || "").replace(/\\n/g, "\\r").split("\\r");
@@ -584,6 +872,19 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     if (hasTextOverflow(frame)) violations.push(label + ":body-overflow");
     return frame;
   }}
+  function shrinkAreaToContent(frame, minHeight, label, adjustments) {{
+    var startHeight = frameHeight(frame), currentHeight = startHeight, floor = Math.max(18, Number(minHeight || 24)), step = 3;
+    try {{ if (frame.kind !== TextType.AREATEXT) return frame; }} catch (kindError) {{ return frame; }}
+    while (currentHeight - step >= floor) {{
+      var candidate = currentHeight - step;
+      if (!resizeTextFrame(frame, null, candidate)) break;
+      try {{ app.redraw(); }} catch (redrawError) {{}}
+      if (hasTextOverflow(frame)) {{ resizeTextFrame(frame, null, currentHeight); break; }}
+      currentHeight = candidate;
+    }}
+    if (startHeight - currentHeight > 0.5) adjustments.push(label + ":content-height-" + Math.round(currentHeight * 10) / 10);
+    return frame;
+  }}
   function translateY(item, delta) {{ if (item && Math.abs(delta) > 0.01) item.translate(0, delta); }}
   function applyTitleBarFill(bar, behavior, label, adjustments, violations) {{
     var cmyk = (behavior && behavior.titleBarFillCMYK) || [0, 0, 0, 57];
@@ -608,7 +909,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var regions = page.regions || [], sections = [];
     for (var i = 0; i < regions.length; i += 1) if (regions[i].role === "flow-section") sections.push(regions[i]);
     sections.sort(function (left, right) {{ return Number((left.behavior || {{}}).order || 0) - Number((right.behavior || {{}}).order || 0); }});
-    var previousBottom = null;
+    var previousBottom = null, lastBody = null, lastSection = null, lastTitle = null, lastBar = null;
     for (var s = 0; s < sections.length; s += 1) {{
       var section = sections[s], behavior = section.behavior || {{}};
       var text = refsByType(section, "textFrame"), paths = refsByType(section, "pathItem");
@@ -619,21 +920,51 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       applyTitleBarFill(bar, behavior, section.id, adjustments, violations);
       var barWidth = Number(bar.geometricBounds[2]) - Number(bar.geometricBounds[0]);
       var titleGuard = guards[String(titleIndex)] || {{}};
-      if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(titleIndex, Number(behavior.titleMaxLines || 1), Number(behavior.titleMinFontSizePt || 30), barWidth - 28, section.id + "-title", adjustments, violations, behavior);
+      if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(titleIndex, Number(behavior.titleMaxLines || 1), Number(behavior.titleMinFontSizePt || 30), Number(bar.geometricBounds[2]) - Number(title.geometricBounds[0]) - 14, section.id + "-title", adjustments, violations, behavior);
       var bodyGuard = guards[String(bodyIndex)] || {{}};
+      applyBodyTypographyToFrame(textAt(bodyIndex), behavior, section.id + "-body", adjustments);
       var body = fitAreaTextHeight(bodyIndex, Number(behavior.bodyMinFontSizePt || 7), Number(behavior.bodyMinHeightPt || 24), Number(behavior.bodyMaxHeightPt || 260), bodyGuard.expectedSourceText, section.id + "-body", adjustments, violations);
       if (!body) continue;
       growAreaUntilFits(body, Number(behavior.bodyMinFontSizePt || 7), Number(behavior.bodyMaxHeightPt || 260), section.id + "-body", adjustments, violations, bodyFontIsLocked(bodyIndex));
+      shrinkAreaToContent(body, Number(behavior.bodyMinHeightPt || 24), section.id + "-body", adjustments);
       var currentTop = Number(bar.geometricBounds[1]);
       var desiredTop = previousBottom === null ? currentTop : previousBottom - Number(behavior.sectionGapPt || 12);
       var delta = desiredTop - currentTop;
       translateY(bar, delta); translateY(title, delta); translateY(body, delta);
       if (Math.abs(delta) > 0.01) adjustments.push(section.id + ":moved-y-" + Math.round(delta * 10) / 10);
       previousBottom = Number(body.geometricBounds[3]);
+      lastBody = body; lastSection = section; lastTitle = title; lastBar = bar;
       adjustments.push(section.id + ":bar-top-" + Math.round(Number(bar.geometricBounds[1]) * 10) / 10 + ":body-bottom-" + Math.round(previousBottom * 10) / 10);
     }}
     var contentBottom = page.safeBounds && page.safeBounds.length === 4 ? Number(page.safeBounds[3]) : -550;
-    if (previousBottom !== null && previousBottom < contentBottom) continuations.push("artboard-" + page.artboardIndex + ":new-artboard-required");
+    // Keep every section directly after the preceding section. If the final
+    // body still crosses the safe bottom, fill the remaining space first and
+    // thread only the overflow onto an inserted continuation artboard.
+    if (previousBottom !== null && previousBottom < contentBottom && lastSection && lastBody && lastTitle && lastBar) {{
+      var pageNumber = null;
+      for (var pr = 0; pr < regions.length; pr += 1) if (regions[pr].role === "fixed-page-number") {{
+        var pageRefs = refsByType(regions[pr], "textFrame"); if (pageRefs.length) pageNumber = textAt(Number(pageRefs[0]));
+      }}
+      var splitBodyTop = Number(lastBar.geometricBounds[3]) - Number((lastSection.behavior || {{}}).bodyTopGapPt || 18);
+      var availableHeight = splitBodyTop - contentBottom;
+      if (availableHeight >= Number((lastSection.behavior || {{}}).minFirstPanelHeightPt || 24)) {{
+        moveTopLeft(lastBody, Number(lastBody.geometricBounds[0]), splitBodyTop);
+        resizeTextFrame(lastBody, null, availableHeight);
+        adjustments.push(lastSection.id + ":filled-remaining-page-space");
+        var current = lastBody, sequence = 0, limit = Number((lastSection.behavior || {{}}).maxContinuationArtboards || 10);
+        while (hasTextOverflow(current) && sequence < limit) {{
+          sequence += 1;
+          var continued = createSafetyContinuation(page, lastSection, lastTitle, lastBody, lastBar, pageNumber, sequence, current, adjustments, violations, pageNumber ? parsePageNumber(pageNumber.contents) : Number(page.artboardIndex) + 1);
+          if (!continued) break;
+          current = continued.body;
+        }}
+        if (hasTextOverflow(current)) continuations.push("artboard-" + page.artboardIndex + ":vertical-continuation-limit");
+      }} else {{
+        adjustments.push(lastSection.id + ":next-page-because-no-title-row-space");
+        var inserted = moveVerticalSectionToInsertedArtboard(page, lastSection, lastTitle, lastBody, lastBar, pageNumber, adjustments, violations);
+        if (!inserted || hasTextOverflow(inserted.body)) continuations.push("artboard-" + page.artboardIndex + ":new-artboard-required");
+      }}
+    }}
   }}
   function splitParagraphs(value) {{
     var raw = String(value || "").replace(/\\n/g, "\\r").split("\\r"), result = [];
@@ -677,9 +1008,49 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var bounds = item.geometricBounds;
     item.translate(Number(left) - Number(bounds[0]), Number(top) - Number(bounds[1]));
   }}
+  function alignTitleVerticallyInBar(title, bar, behavior, label, adjustments, violations) {{
+    var policy = String((behavior || {{}}).titleVerticalAlign || "preserve");
+    if (policy === "preserve") return;
+    try {{
+      app.redraw();
+      var barBounds = bar.geometricBounds, titleBounds = title.geometricBounds, allowedBottomBleed = 0;
+      if (policy === "bottom") {{
+        var bottomInset = Number((behavior || {{}}).titleBottomInsetPt || 8);
+        translateY(title, Number(barBounds[3]) + bottomInset - Number(titleBounds[3]));
+      }} else if (policy === "match-reference-bottom") {{
+        var referenceOffset = Number((behavior || {{}}).resolvedTitleBottomOffsetPt);
+        if (!isFinite(referenceOffset)) {{ violations.push(label + ":missing-title-reference-offset"); return; }}
+        allowedBottomBleed = Math.max(0, -referenceOffset);
+        translateY(title, Number(barBounds[3]) + referenceOffset - Number(titleBounds[3]));
+      }} else if (policy === "center") {{
+        var barCenter = (Number(barBounds[1]) + Number(barBounds[3])) / 2;
+        var titleCenter = (Number(titleBounds[1]) + Number(titleBounds[3])) / 2;
+        translateY(title, barCenter - titleCenter);
+      }} else {{
+        violations.push(label + ":unsupported-title-vertical-align-" + policy);
+        return;
+      }}
+      app.redraw();
+      titleBounds = title.geometricBounds;
+      if (Number(titleBounds[1]) > Number(barBounds[1]) + 0.5 || Number(titleBounds[3]) < Number(barBounds[3]) - allowedBottomBleed - 0.5) violations.push(label + ":title-vertical-overflow");
+      else adjustments.push(label + ":title-vertical-align-" + policy);
+    }} catch (alignError) {{ violations.push(label + ":title-vertical-align-unavailable"); }}
+  }}
   function parsePageNumber(value) {{
     var match = String(value || "").match(/-\\s*(\\d+)\\s*-/);
     return match ? Number(match[1]) : 0;
+  }}
+  function placeContinuationPageNumber(pageNumber, left, width, top, behavior, label, adjustments, violations) {{
+    var panelCount = Math.max(1, Math.round(Number((behavior || {{}}).continuationPanelCount || 1)));
+    var panelIndex = Math.round(Number((behavior || {{}}).continuationPanelIndex || 0));
+    if (panelIndex < 0 || panelIndex >= panelCount) {{
+      violations.push(label + ":invalid-continuation-panel-index");
+      panelIndex = 0;
+    }}
+    var panelWidth = Number(width) / panelCount;
+    var centerX = Number(left) + panelWidth * (panelIndex + 0.5);
+    moveTopLeft(pageNumber, centerX - Number(pageNumber.width) / 2, Number(top));
+    adjustments.push(label + ":page-number-panel-" + panelIndex + "-of-" + panelCount);
   }}
   function createSafetyContinuation(page, section, sourceTitle, sourceBody, sourceBar, sourcePageNumber, sequence, currentBody, adjustments, violations, basePageNumber) {{
     var baseRect = doc.artboards[page.artboardIndex].artboardRect;
@@ -700,11 +1071,12 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     try {{ currentBody.nextFrame = body; currentBody.name = "__layout_threaded__"; body.name = "__layout_threaded__"; }} catch (threadError) {{ violations.push(section.id + ":cannot-thread-continuation"); return null; }}
     if (pageNumber) {{
       pageNumber.contents = "- " + ((basePageNumber === undefined ? parsePageNumber(sourcePageNumber.contents) : Number(basePageNumber)) + sequence) + " -";
-      moveTopLeft(pageNumber, newLeft + width / 2 - Number(pageNumber.width) / 2, newBottom + 22.9666);
+      placeContinuationPageNumber(pageNumber, newLeft, width, newBottom + 22.9666, section.behavior || {{}}, section.id + ":continuation-" + sequence, adjustments, violations);
     }}
     var titleWidth = width - 72;
     var titleSize = Number(title.textRange.characterAttributes.size || 45);
     while (Number(title.width) > titleWidth && titleSize > Number((section.behavior || {{}}).titleMinFontSizePt || 30)) {{ titleSize = Math.max(Number((section.behavior || {{}}).titleMinFontSizePt || 30), titleSize - 0.5); title.textRange.characterAttributes.size = titleSize; }}
+    alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":continuation-" + sequence, adjustments, violations);
     adjustments.push(section.id + ":created-continuation-artboard-" + insertIndex);
     return {{body: body, pageNumber: pageNumber}};
   }}
@@ -720,7 +1092,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       var titleRefs = refsByType(titleRegions[t], "textFrame"), titlePaths = refsByType(titleRegions[t], "pathItem"), titleBehavior = titleRegions[t].behavior || {{}};
       if (titleRefs.length && titlePaths.length) {{
         var titleBar = pathAt(titlePaths[0]), titleGuard = guards[String(titleRefs[0])] || {{}};
-        if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(Number(titleRefs[0]), Number(titleBehavior.titleMaxLines || 1), Number(titleBehavior.titleMinFontSizePt || 30), Number(titleBar.width) - 28, titleRegions[t].id, adjustments, violations, titleBehavior);
+        if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(Number(titleRefs[0]), Number(titleBehavior.titleMaxLines || 1), Number(titleBehavior.titleMinFontSizePt || 30), Number(titleBar.geometricBounds[2]) - Number(textAt(Number(titleRefs[0])).geometricBounds[0]) - 14, titleRegions[t].id, adjustments, violations, titleBehavior);
       }}
     }}
     if (parts) applyBalancedPartsList(parts, adjustments, violations);
@@ -729,7 +1101,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     if (text.length < 2 || paths.length < 1) {{ violations.push(safety.id + ":incomplete-continuation-binding"); return; }}
     var title = textAt(text[0]), body = textAt(text[1]), bar = pathAt(paths[0]);
     var titleGuard = guards[String(text[0])] || {{}}, behavior = safety.behavior || {{}};
-    if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(Number(text[0]), Number(behavior.titleMaxLines || 1), Number(behavior.titleMinFontSizePt || 30), Number(bar.width) - 28, safety.id + "-title", adjustments, violations, behavior);
+    if (titleGuard.expectedSourceText !== undefined && titleGuard.expectedSourceText !== null) fitPointText(Number(text[0]), Number(behavior.titleMaxLines || 1), Number(behavior.titleMinFontSizePt || 30), Number(bar.geometricBounds[2]) - Number(title.geometricBounds[0]) - 14, safety.id + "-title", adjustments, violations, behavior);
     if (!bodyFontIsLocked(Number(text[1])) && Number(body.textRange.characterAttributes.size || 8.5) < Number(behavior.bodyMinFontSizePt || 7)) body.textRange.characterAttributes.size = Number(behavior.bodyMinFontSizePt || 7);
     var numberRefs = safetyPageNumber ? refsByType(safetyPageNumber, "textFrame") : [], pageNumber = numberRefs.length ? textAt(numberRefs[0]) : null;
     var originalLaterNumbers = [], baseNumber = pageNumber ? parsePageNumber(pageNumber.contents) : 0;
@@ -758,6 +1130,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
   function createAreaFrame(left, top, width, height, contents, styleSource) {{
     var path = doc.pathItems.rectangle(Number(top), Number(left), Math.max(12, Number(width)), Math.max(12, Number(height)));
     var frame = doc.textFrames.areaText(path); frame.contents = String(contents || "");
+    frame.name = "__layout_generated_text__";
     if (styleSource) copyTextStyle(styleSource, frame, 8);
     return frame;
   }}
@@ -769,6 +1142,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var outline = compoundAt(compoundIndex), bounds = outline.geometricBounds;
     var replacement = layoutTextReplacements[String(behavior.virtualTitleSlotIndex)] || {{}};
     var title = doc.textFrames.pointText([Number(bounds[0]), Number(bounds[1])]);
+    title.name = "__layout_generated_text__";
     title.contents = String(replacement.text || behavior.sourceTitleText || "Service Support");
     var attrs = title.textRange.characterAttributes, size = Number(replacement.fontSize || 30), minSize = Number(behavior.titleMinFontSizePt || 30);
     attrs.size = Math.max(minSize, size);
@@ -784,10 +1158,78 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       horizontalScale = Math.max(minHorizontalScale, horizontalScale - 1);
       try {{ attrs.horizontalScale = horizontalScale; }} catch (scaleWriteError) {{ break; }}
     }}
+    alignTitleVerticallyInBar(title, bar, behavior, region.id, adjustments, violations);
     if (horizontalScale < 99.5) adjustments.push(region.id + ":title-horizontal-scale-" + horizontalScale);
     if (Number(title.width) > maxWidth + 0.5) violations.push(region.id + ":title-width-overflow");
     adjustments.push(region.id + ":outlined-title-replaced");
     return title;
+  }}
+  function createLiveCoverLabel(region, adjustments, violations) {{
+    var groups = refsByType(region, "groupItem"), behavior = region.behavior || {{}};
+    if (!groups.length) {{ violations.push(region.id + ":missing-outlined-cover-binding"); return null; }}
+    var groupIndex = Number(groups[0]);
+    if (groupIndex < 0 || groupIndex >= sourceGroupItems.length) {{ violations.push(region.id + ":missing-group-" + groupIndex); return null; }}
+    var outline = groupAt(groupIndex), bounds = outline.geometricBounds;
+    var replacement = layoutTextReplacements[String(behavior.virtualTitleSlotIndex)] || {{}};
+    var value = normalize(replacement.text || behavior.sourceTitleText || "New Generation");
+    if (value.indexOf(" ") >= 0 && lineCount(value) === 1 && compactLength(value) > 18) value = wrapAtHalf(value);
+    var title = doc.textFrames.pointText([Number(bounds[0]), Number(bounds[1])]);
+    title.name = "__layout_generated_text__";
+    title.contents = value;
+    var attrs = title.textRange.characterAttributes;
+    attrs.size = Number(behavior.titleFontSizePt || replacement.fontSize || 22);
+    try {{ attrs.textFont = app.textFonts.getByName(String(behavior.titleFontName || replacement.fontName || "TimesNewRomanPSMT")); }}
+    catch (fontError) {{ violations.push(region.id + ":title-font-fallback"); }}
+    try {{ var white = new RGBColor(); white.red = 255; white.green = 255; white.blue = 255; attrs.fillColor = white; }} catch (colorError) {{}}
+    try {{ title.rotate(Number(behavior.rotationDegrees || -45)); }} catch (rotateError) {{ violations.push(region.id + ":title-rotation-unavailable"); }}
+    try {{
+      app.redraw();
+      var targetWidth = Math.max(12, Number(bounds[2]) - Number(bounds[0]) - 4);
+      var targetHeight = Math.max(12, Number(bounds[1]) - Number(bounds[3]) - 4);
+      var configuredMinSize = Number(behavior.titleMinFontSizePt || 16);
+      var absoluteMinSize = Number(behavior.titleAbsoluteMinFontSizePt || 10);
+      var currentSize = Number(attrs.size || 22);
+      var rendered = title.visibleBounds;
+      function coverLabelFits() {{
+        return Number(rendered[2]) - Number(rendered[0]) <= targetWidth + 0.5 &&
+          Number(rendered[1]) - Number(rendered[3]) <= targetHeight + 0.5;
+      }}
+      while (!coverLabelFits() && currentSize > absoluteMinSize) {{
+        currentSize = Math.max(absoluteMinSize, currentSize - 0.5);
+        attrs.size = currentSize;
+        app.redraw();
+        rendered = title.visibleBounds;
+      }}
+      if (currentSize < configuredMinSize) adjustments.push(region.id + ":title-fallback-font-" + currentSize);
+      if (!coverLabelFits()) violations.push(region.id + ":title-bounds-overflow");
+      var centerX = (Number(bounds[0]) + Number(bounds[2])) / 2, centerY = (Number(bounds[1]) + Number(bounds[3])) / 2;
+      title.translate(centerX - (Number(rendered[0]) + Number(rendered[2])) / 2, centerY - (Number(rendered[1]) + Number(rendered[3])) / 2);
+    }} catch (centerError) {{ violations.push(region.id + ":title-centering-unavailable"); }}
+    outline.hidden = true;
+    adjustments.push(region.id + ":outlined-label-replaced");
+    return title;
+  }}
+  function applyCoverDistributorEntry(region, page, adjustments, violations) {{
+    var refs = refsByType(region, "textFrame"), paths = refsByType(region, "pathItem"), behavior = region.behavior || {{}};
+    if (!refs.length || !paths.length) {{ violations.push(region.id + ":incomplete-entry-binding"); return; }}
+    var pathIndex = Number(paths[0]);
+    if (pathIndex < 0 || pathIndex >= sourcePathItems.length) {{ violations.push(region.id + ":missing-entry-path-" + pathIndex); return; }}
+    var card = pathAt(pathIndex), titleIndex = Number(refs[0]), title = textAt(titleIndex);
+    var left = Number(behavior.cardLeftPt || card.geometricBounds[0]), right = Number(behavior.cardRightPt || card.geometricBounds[2]);
+    var top = Number(behavior.cardTopPt || card.geometricBounds[1]), bottom = Number(behavior.cardBottomPt || card.geometricBounds[3]);
+    var width = right - left, height = top - bottom, inset = 12;
+    try {{ card.width = width; card.height = height; moveTopLeft(card, left, top); }}
+    catch (cardResizeError) {{ violations.push(region.id + ":card-resize-unavailable"); return; }}
+    fitPointText(titleIndex, 1, Number(behavior.titleMinFontSizePt || 10), width - inset * 2, region.id + "-title", adjustments, violations, {{titleMinHorizontalScale:Number(behavior.titleMinHorizontalScale || 85)}});
+    try {{
+      app.redraw();
+      var titleHeight = Number(title.geometricBounds[1]) - Number(title.geometricBounds[3]);
+      moveTopLeft(title, left + (width - Number(title.width)) / 2, top - (height - titleHeight) / 2);
+    }}
+    catch (titlePositionError) {{ violations.push(region.id + ":title-position-unavailable"); }}
+    var titleBounds = title.geometricBounds;
+    if (Number(titleBounds[0]) < left + inset - 0.5 || Number(titleBounds[2]) > right - inset + 0.5 || Number(titleBounds[1]) > top + 0.5 || Number(titleBounds[3]) < bottom - 0.5) violations.push(region.id + ":title-outside-entry-card");
+    adjustments.push(region.id + ":entry-card-widened-title-centered");
   }}
   function serviceSupportText(refs) {{
     var byIndex = {{}}, values = [];
@@ -831,6 +1273,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     applyTitleBarFill(bar, section.behavior || {{}}, section.id + ":sibling", adjustments, violations);
     try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":sibling-bar-width"); }}
     moveTopLeft(bar, left, top); moveTopLeft(title, left + 36, top - 8);
+    alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":sibling", adjustments, violations);
     var fontSize = Number(body.textRange.characterAttributes.size || 7), requiredHeight = Math.max(96, estimatedWrappedLines(remainingText, width - 72, fontSize) * fontSize * 1.6 + 30);
     var availableHeight = Math.max(24, Number(targetBar.geometricBounds[3]) - Number(siblingBottom) - 72);
     if (!resizeTextFrame(body, width - 72, Math.min(availableHeight, requiredHeight))) {{ violations.push(section.id + ":sibling-body-size"); return null; }}
@@ -848,11 +1291,37 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     applyTitleBarFill(bar, section.behavior || {{}}, section.id + ":moved", adjustments, violations);
     try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":moved-bar-width"); }}
     moveTopLeft(bar, left, top - 31.1811); moveTopLeft(title, left + 35.7573, top - 39.3774);
+    alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":moved", adjustments, violations);
     if (!resizeTextFrame(body, width - 72, height - 153.1785)) {{ violations.push(section.id + ":moved-body-size"); return null; }}
     moveTopLeft(body, left + 36, top - 99.4478); body.contents = sourceBody.contents;
-    if (pageNumber) {{ pageNumber.contents = "- " + (parsePageNumber(sourcePageNumber.contents) + sequence) + " -"; moveTopLeft(pageNumber, left + width / 2 - Number(pageNumber.width) / 2, bottom + 22.9666); }}
+    if (pageNumber) {{ pageNumber.contents = "- " + (parsePageNumber(sourcePageNumber.contents) + sequence) + " -"; placeContinuationPageNumber(pageNumber, left, width, bottom + 22.9666, section.behavior || {{}}, section.id + ":moved", adjustments, violations); }}
     sourceBar.hidden = true; sourceTitle.hidden = true; sourceBody.hidden = true;
     adjustments.push(section.id + ":moved-to-artboard-" + index);
+    return {{body:body,pageNumber:pageNumber}};
+  }}
+  function moveVerticalSectionToInsertedArtboard(page, section, sourceTitle, sourceBody, sourceBar, sourcePageNumber, adjustments, violations) {{
+    var baseRect = doc.artboards[page.artboardIndex].artboardRect;
+    var width = Number(baseRect[2]) - Number(baseRect[0]), height = Number(baseRect[1]) - Number(baseRect[3]);
+    var lowest = Number(baseRect[3]);
+    for (var i = 0; i < doc.artboards.length; i += 1) lowest = Math.min(lowest, Number(doc.artboards[i].artboardRect[3]));
+    var left = Number(baseRect[0]), top = lowest - 36, bottom = top - height, insertedIndex = Number(page.artboardIndex) + 1;
+    try {{ doc.artboards.insert([left, top, left + width, bottom], insertedIndex); }}
+    catch (insertError) {{ violations.push(section.id + ":cannot-insert-continuation-artboard"); return null; }}
+    var bar = sourceBar.duplicate(), title = sourceTitle.duplicate(), body = sourceBody.duplicate();
+    var pageNumber = sourcePageNumber ? sourcePageNumber.duplicate() : null, behavior = section.behavior || {{}};
+    applyTitleBarFill(bar, behavior, section.id + ":inserted", adjustments, violations);
+    try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":inserted-bar-width"); }}
+    moveTopLeft(bar, left, top - 31.1811); moveTopLeft(title, left + 35.7573, top - 39.3774);
+    if (!resizeTextFrame(body, width - 72, height - 153.1785)) {{ violations.push(section.id + ":inserted-body-size"); return null; }}
+    moveTopLeft(body, left + 36, top - 99.4478); applyBodyTypographyToFrame(body, behavior, section.id + "-body", adjustments);
+    var baseNumber = sourcePageNumber ? parsePageNumber(sourcePageNumber.contents) : Number(page.artboardIndex) + 1;
+    for (var n = 0; n < sourceTextFrames.length; n += 1) {{
+      var value = parsePageNumber(sourceTextFrames[n].contents);
+      if (value > baseNumber) sourceTextFrames[n].contents = "- " + (value + 1) + " -";
+    }}
+    if (pageNumber) {{ pageNumber.contents = "- " + (baseNumber + 1) + " -"; placeContinuationPageNumber(pageNumber, left, width, bottom + 22.9666, behavior, section.id + ":inserted", adjustments, violations); }}
+    sourceBar.hidden = true; sourceTitle.hidden = true; sourceBody.hidden = true;
+    adjustments.push(section.id + ":inserted-artboard-" + insertedIndex);
     return {{body:body,pageNumber:pageNumber}};
   }}
   function applyPairedSectionsFlowPage(page, adjustments, violations, continuations) {{
@@ -873,9 +1342,9 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var assemblyTitle = textAt(assemblyText[0]), assemblyBody = textAt(assemblyText[1]), assemblyBar = pathAt(assemblyPaths[0]);
     var operationTitle = textAt(operationText[0]), operationBody = textAt(operationText[1]), operationBar = pathAt(operationPaths[0]);
     var maintenanceTitle = textAt(maintenanceText[0]), maintenanceBody = textAt(maintenanceText[1]), maintenanceBar = pathAt(maintenancePaths[0]);
-    fitPointText(Number(assemblyText[0]), Number((assembly.behavior || {{}}).titleMaxLines || 1), Number((assembly.behavior || {{}}).titleMinFontSizePt || 30), Number(assemblyBar.width) - 28, assembly.id + "-title", adjustments, violations, assembly.behavior);
-    fitPointText(Number(operationText[0]), Number((operation.behavior || {{}}).titleMaxLines || 1), Number((operation.behavior || {{}}).titleMinFontSizePt || 30), Number(operationBar.width) - 28, operation.id + "-title", adjustments, violations, operation.behavior);
-    fitPointText(Number(maintenanceText[0]), Number((maintenance.behavior || {{}}).titleMaxLines || 1), Number((maintenance.behavior || {{}}).titleMinFontSizePt || 30), Number(maintenanceBar.width) - 28, maintenance.id + "-title", adjustments, violations, maintenance.behavior);
+    fitPointText(Number(assemblyText[0]), Number((assembly.behavior || {{}}).titleMaxLines || 1), Number((assembly.behavior || {{}}).titleMinFontSizePt || 30), Number(assemblyBar.geometricBounds[2]) - Number(assemblyTitle.geometricBounds[0]) - 14, assembly.id + "-title", adjustments, violations, assembly.behavior);
+    fitPointText(Number(operationText[0]), Number((operation.behavior || {{}}).titleMaxLines || 1), Number((operation.behavior || {{}}).titleMinFontSizePt || 30), Number(operationBar.geometricBounds[2]) - Number(operationTitle.geometricBounds[0]) - 14, operation.id + "-title", adjustments, violations, operation.behavior);
+    fitPointText(Number(maintenanceText[0]), Number((maintenance.behavior || {{}}).titleMaxLines || 1), Number((maintenance.behavior || {{}}).titleMinFontSizePt || 30), Number(maintenanceBar.geometricBounds[2]) - Number(maintenanceTitle.geometricBounds[0]) - 14, maintenance.id + "-title", adjustments, violations, maintenance.behavior);
     var assemblyGuard = guards[String(assemblyText[1])] || {{}}, operationGuard = guards[String(operationText[1])] || {{}}, maintenanceGuard = guards[String(maintenanceText[1])] || {{}};
     fitAreaTextHeight(Number(assemblyText[1]), Number((assembly.behavior || {{}}).bodyMinFontSizePt || 7), 24, Number((assembly.behavior || {{}}).bodyMaxHeightPt || 180), assemblyGuard.expectedSourceText, assembly.id + "-body", adjustments, violations);
     fitAreaTextHeight(Number(operationText[1]), Number((operation.behavior || {{}}).bodyMinFontSizePt || 7), 24, 260, operationGuard.expectedSourceText, operation.id + "-body", adjustments, violations);
@@ -894,7 +1363,15 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var operationBarTop = Number(db[3]) - Number(diagramBehavior.minBottomGapPt || 8), operationBodyTop = operationBarTop + operationBodyOffset;
     var operationAvailable = operationBodyTop - Number(page.safeBounds[3]);
     placeSectionTitleAndBody(operationBar, operationTitle, operationBody, operationBarTop, operationBodyTop, operationAvailable);
-    if (operationAvailable < firstPanelMinHeight) violations.push(operation.id + ":insufficient-first-page-space");
+    if (operationAvailable < firstPanelMinHeight) {{
+      if (operation.behavior && operation.behavior.preferSiblingPanel) adjustments.push(operation.id + ":small-first-panel-continued");
+      else violations.push(operation.id + ":insufficient-first-page-space");
+    }}
+    var serviceBehavior = service.behavior || {{}};
+    if (String(serviceBehavior.titleVerticalAlign || "") === "match-reference-bottom") {{
+      serviceBehavior.resolvedTitleBottomOffsetPt = Number(maintenanceTitle.geometricBounds[3]) - Number(maintenanceBar.geometricBounds[3]);
+      adjustments.push(service.id + ":title-reference-bottom-offset-" + Math.round(Number(serviceBehavior.resolvedTitleBottomOffsetPt) * 100) / 100);
+    }}
     var serviceTitle = createLiveOutlinedTitle(service, adjustments, violations), servicePaths = refsByType(service, "pathItem"), serviceText = refsByType(service, "textFrame"), serviceGroups = refsByType(service, "groupItem");
     if (!serviceTitle || !servicePaths.length || !serviceText.length) return;
     var serviceBar = pathAt(servicePaths[0]), maintenanceGap = Number((maintenance.behavior || {{}}).sectionGapPt || 18), serviceBarTop = Number(maintenanceBody.geometricBounds[3]) - maintenanceGap;
@@ -903,6 +1380,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     if (serviceGroups.length) groupAt(serviceGroups[0]).hidden = true;
     var contactsTop = Number(serviceBar.geometricBounds[3]) - 18, contactsHeight = contactsTop - Number(page.safeBounds[3]);
     var contactsBody = createAreaFrame(Number(contactStyle.geometricBounds[0]), contactsTop, 325.8, contactsHeight, contacts, contactStyle);
+    applyBodyTypographyToFrame(contactsBody, service.behavior || {{}}, service.id + "-body", adjustments);
     if (!bodyFontIsLocked(Number(serviceText[0])) && Number(contactsBody.textRange.characterAttributes.size || 8) < Number((service.behavior || {{}}).bodyMinFontSizePt || 7)) contactsBody.textRange.characterAttributes.size = Number((service.behavior || {{}}).bodyMinFontSizePt || 7);
     var leftRefs = leftNumberRegion ? refsByType(leftNumberRegion, "textFrame") : [], rightRefs = rightNumberRegion ? refsByType(rightNumberRegion, "textFrame") : [];
     var leftNumber = leftRefs.length ? textAt(leftRefs[0]) : null, rightNumber = rightRefs.length ? textAt(rightRefs[0]) : null;
@@ -920,7 +1398,18 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
           placeSectionTitleAndBody(maintenanceBar, maintenanceTitle, maintenanceBody, maintenanceTop, maintenanceTop + maintenanceBodyOffset, maintenanceBodyHeight);
           growAreaUntilFits(maintenanceBody, Number((maintenance.behavior || {{}}).bodyMinFontSizePt || 7), Number((maintenance.behavior || {{}}).bodyMaxHeightPt || 180), maintenance.id + "-body", adjustments, violations, bodyFontIsLocked(Number(maintenanceText[1])));
           adjustments.push(maintenance.id + ":moved-below-operation-continuation");
-          moveSectionToNewArtboard(page, service, serviceTitle, contactsBody, serviceBar, rightNumber, 1, adjustments, violations);
+          var splitService = serviceBehavior.allowCardSplitAcrossPages === true;
+          var followedServiceBarTop = Number(maintenanceBody.geometricBounds[3]) - maintenanceGap;
+          var followedContactsTop = followedServiceBarTop - (Number(serviceBar.geometricBounds[1]) - Number(serviceBar.geometricBounds[3])) - 18;
+          var followedContactsHeight = followedContactsTop - Number(page.safeBounds[3]);
+          var minimumServiceBodyHeight = Number(serviceBehavior.firstPanelBodyMinHeightPt || 42);
+          if (splitService && followedContactsHeight >= minimumServiceBodyHeight) {{
+            placeSectionTitleAndBody(serviceBar, serviceTitle, contactsBody, followedServiceBarTop, followedContactsTop, followedContactsHeight);
+            adjustments.push(service.id + ":started-below-maintenance");
+            continueSection(page, service, serviceTitle, contactsBody, serviceBar, rightNumber, state, adjustments, violations, continuations);
+          }} else {{
+            moveSectionToNewArtboard(page, service, serviceTitle, contactsBody, serviceBar, rightNumber, 1, adjustments, violations);
+          }}
         }}
       }}
     }} else {{
@@ -956,6 +1445,38 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
           var compoundIndex = Number(compounds[ci]);
           if (compoundIndex < 0 || compoundIndex >= sourceCompoundPathItems.length) violations.push(region.id + ":missing-compound-path-item-" + compoundIndex);
         }}
+        if (region.role === "outlined-cover-label") createLiveCoverLabel(region, adjustments, violations);
+        if (region.role === "adaptive-entry-label") applyCoverDistributorEntry(region, pages[p], adjustments, violations);
+        if (region.id === "cover-brand-header") fitCoverBrandHeader(region, adjustments, violations);
+        if (region.id === "cover-main-visual") {{
+          var manualRefs = refsByType(region, "textFrame");
+          if (manualRefs.length > 0) {{
+            var manualIndex = Number(manualRefs[0]), manualFrame = textAt(manualIndex);
+            var visualRight = groups.length > 1 ? Number(groupAt(Number(groups[1])).geometricBounds[2]) : Number(pages[p].safeBounds[2]);
+            var manualMaxWidth = visualRight - Number(manualFrame.geometricBounds[0]) - 14;
+            try {{
+              var manualAttrs = manualFrame.textRange.characterAttributes;
+              if (Number(manualAttrs.size || 12) > 11) manualAttrs.size = 11;
+              manualAttrs.horizontalScale = 100;
+            }} catch (manualTitleResetError) {{ violations.push("cover-manual-title:style-reset-unavailable"); }}
+            fitPointText(manualIndex, 1, 8.5, manualMaxWidth, "cover-manual-title", adjustments, violations, {{titleMinHorizontalScale: 75}});
+            try {{
+              var manualAttrs = manualFrame.textRange.characterAttributes;
+              app.redraw();
+              var manualRightLimit = visualRight - 14;
+              var manualSize = Number(manualAttrs.size || 11), manualScale = Number(manualAttrs.horizontalScale || 100);
+              while (Number(manualFrame.geometricBounds[2]) > manualRightLimit + 0.5 && manualSize > 8.5) {{
+                manualSize = Math.max(8.5, manualSize - 0.5); manualAttrs.size = manualSize; app.redraw();
+              }}
+              while (Number(manualFrame.geometricBounds[2]) > manualRightLimit + 0.5 && manualScale > 70) {{
+                manualScale = Math.max(70, manualScale - 1); manualAttrs.horizontalScale = manualScale; app.redraw();
+              }}
+              if (manualSize < 10.9) adjustments.push("cover-manual-title:font-" + manualSize);
+              if (manualScale < 99.5) adjustments.push("cover-manual-title:horizontal-scale-" + manualScale);
+              if (Number(manualFrame.geometricBounds[2]) > manualRightLimit + 0.5) violations.push("cover-manual-title:right-overflow");
+            }} catch (manualTitleMarginError) {{ violations.push("cover-manual-title:safe-margin-unavailable"); }}
+          }}
+        }}
         if (region.id !== "cover-product-identity") continue;
         var refs = refsByType(region, "textFrame"), behavior = region.behavior || {{}};
         if (refs.length > 0) {{
@@ -977,6 +1498,45 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     ensureEvenArtboards(adjustments, violations);
   }}
   function writeText(path, content) {{ var file = new File(path); file.encoding = "UTF-8"; if (!file.open("w")) throw new Error("Cannot write QA report: " + path); file.write(content); file.close(); }}
+  function assetBounds(value) {{ return [Number(value[0]), Number(value[1]), Number(value[2]), Number(value[3])]; }}
+  function fitPlacedItem(item, frameBounds, fit) {{
+    var frame = assetBounds(frameBounds), frameW = frame[2] - frame[0], frameH = frame[1] - frame[3];
+    var current = item.geometricBounds, itemW = Number(current[2]) - Number(current[0]), itemH = Number(current[1]) - Number(current[3]);
+    if (frameW <= 0 || frameH <= 0 || itemW <= 0 || itemH <= 0) throw new Error("Invalid image or frame bounds");
+    if (fit === "stretch") {{ item.width = frameW; item.height = frameH; }}
+    else {{
+      var factor = fit === "cover" ? Math.max(frameW / itemW, frameH / itemH) : Math.min(frameW / itemW, frameH / itemH);
+      item.resize(factor * 100, factor * 100, true, true, true, true, factor * 100, Transformation.CENTER);
+    }}
+    current = item.geometricBounds;
+    var itemCX = (Number(current[0]) + Number(current[2])) / 2, itemCY = (Number(current[1]) + Number(current[3])) / 2;
+    item.translate((frame[0] + frame[2]) / 2 - itemCX, (frame[1] + frame[3]) / 2 - itemCY);
+  }}
+  function hideAssetRefs(refs) {{
+    for (var hr = 0; hr < refs.length; hr += 1) {{
+      var ref = refs[hr] || {{}}, index = Number(ref.value);
+      if (ref.type === "groupItem") {{
+        if (index < 0 || index >= sourceGroupItems.length) throw new Error("GroupItem index out of range: " + index);
+        sourceGroupItems[index].hidden = true;
+      }} else if (ref.type === "compoundPathItem") {{
+        if (index < 0 || index >= sourceCompoundPathItems.length) throw new Error("CompoundPathItem index out of range: " + index);
+        sourceCompoundPathItems[index].hidden = true;
+      }}
+    }}
+  }}
+  function placeAsset(binding, assetFile, target, frameBounds) {{
+    var placed = doc.placedItems.add(); placed.file = assetFile; placed.name = "__asset__" + String(binding.slotId || "unnamed");
+    try {{ placed.move(target, ElementPlacement.PLACEBEFORE); }} catch (moveError) {{}}
+    fitPlacedItem(placed, frameBounds, String(binding.fit || "contain"));
+    if (String(binding.fit || "contain") === "cover") {{
+      var frame = assetBounds(frameBounds), group = doc.groupItems.add(); group.name = "__asset_clip__" + String(binding.slotId || "unnamed");
+      try {{ group.move(target, ElementPlacement.PLACEBEFORE); }} catch (groupMoveError) {{}}
+      placed.move(group, ElementPlacement.PLACEATEND);
+      var mask = group.pathItems.rectangle(frame[1], frame[0], frame[2] - frame[0], frame[1] - frame[3]);
+      mask.stroked = false; mask.filled = false; mask.clipping = true; mask.move(group, ElementPlacement.PLACEATBEGINNING); group.clipped = true;
+    }}
+    return placed;
+  }}
   app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
   var source = new File(sourcePath);
   if (!source.exists) throw new Error("Source file not found: " + sourcePath);
@@ -999,6 +1559,13 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       var index = Number(key);
       if (index < 0 || index >= sourceTextFrames.length) throw new Error("TextFrame index out of range: " + index);
       var guard = guards[key] || {{}};
+      var locator = guard.locator || {{}}, located = textAt(index);
+      if (locator.name && String(located.name || "") !== String(locator.name)) throw new Error("TextFrame name mismatch at index " + index);
+      if (locator.layer && located.layer && String(located.layer.name || "") !== String(locator.layer)) throw new Error("TextFrame layer mismatch at index " + index);
+      if (locator.bounds && locator.bounds.length === 4) {{
+        var actualBounds = located.geometricBounds;
+        for (var boundIndex = 0; boundIndex < 4; boundIndex += 1) if (Math.abs(Number(actualBounds[boundIndex]) - Number(locator.bounds[boundIndex])) > 2) throw new Error("TextFrame bounds fingerprint mismatch at index " + index);
+      }}
       if (guard.expectedSourceText !== undefined && guard.expectedSourceText !== null && normalize(textAt(index).contents) !== normalize(guard.expectedSourceText)) {{
         throw new Error("TextFrame source mismatch at index " + index + " (" + (guard.slotId || "unknown slot") + ")");
       }}
@@ -1014,16 +1581,41 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
         try {{ textAt(index).textRange.characterAttributes.size = Number(style.fontSize); }} catch (sizeError) {{}}
       }}
     }}
+    try {{ app.redraw(); }} catch (replacementRedrawError) {{}}
     for (var a = 0; a < assetBindings.length; a += 1) {{
-      var binding = assetBindings[a];
-      if (binding.mode !== "replace_placed" || binding.objectType !== "placed") continue;
-      var assetIndex = Number(binding.index);
-      if (assetIndex < 0 || assetIndex >= doc.placedItems.length) throw new Error("PlacedItem index out of range: " + assetIndex);
-      var assetFile = new File(binding.path);
-      if (!assetFile.exists) throw new Error("Replacement image not found: " + binding.path);
-      doc.placedItems[assetIndex].file = assetFile;
+      var binding = assetBindings[a], refs = binding.objectRefs || [];
+      var assetFile = new File(binding.path || ""), hasAsset = Boolean(binding.path) && assetFile.exists;
+      if (!hasAsset) {{
+        if (binding.mode === "hide_when_empty" || String(binding.fit || "") === "hide") {{ hideAssetRefs(refs); continue; }}
+        if (binding.required) throw new Error("Replacement image not found: " + binding.path);
+        continue;
+      }}
+      if (binding.mode === "replace_placed") {{
+        var placedRef = refs.length ? refs[0] : {{type:"placed",value:binding.index}};
+        var assetIndex = Number(placedRef.value);
+        if (assetIndex < 0 || assetIndex >= doc.placedItems.length) throw new Error("PlacedItem index out of range: " + assetIndex);
+        var placedTarget = doc.placedItems[assetIndex], placedFrame = binding.bounds || placedTarget.geometricBounds;
+        placedTarget.relink(assetFile); fitPlacedItem(placedTarget, placedFrame, String(binding.fit || "contain"));
+      }} else if (binding.mode === "replace_group_with_raster" || binding.mode === "replace_group_with_vector") {{
+        var targetRef = null, groupTarget = null;
+        for (var gr = 0; gr < refs.length; gr += 1) if (refs[gr].type === "groupItem" || refs[gr].type === "compoundPathItem") {{ targetRef = refs[gr]; break; }}
+        if (!targetRef) throw new Error("Asset slot has no supported target: " + binding.slotId);
+        var groupIndex = Number(targetRef.value);
+        if (targetRef.type === "groupItem") {{
+          if (groupIndex < 0 || groupIndex >= sourceGroupItems.length) throw new Error("GroupItem index out of range: " + groupIndex);
+          groupTarget = sourceGroupItems[groupIndex];
+        }} else {{
+          if (groupIndex < 0 || groupIndex >= sourceCompoundPathItems.length) throw new Error("CompoundPathItem index out of range: " + groupIndex);
+          groupTarget = sourceCompoundPathItems[groupIndex];
+        }}
+        var groupFrame = binding.bounds || groupTarget.geometricBounds;
+        placeAsset(binding, assetFile, groupTarget, groupFrame); hideAssetRefs(refs);
+      }} else if (binding.mode === "hide_when_empty") {{
+        hideAssetRefs(refs);
+      }} else {{ throw new Error("Unsupported asset binding mode: " + binding.mode); }}
     }}
     var layoutAdjustments = [], layoutViolations = [], unresolvedNamedObjects = [], continuationRequests = [];
+    applyStandardBodyTypography(layoutAdjustments);
     applyLayoutRules(layoutAdjustments, layoutViolations, unresolvedNamedObjects, continuationRequests);
     restoreTemplateBodyFontSizes(layoutAdjustments);
     if (outputs.ai) {{
@@ -1042,7 +1634,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       doc.exportFile(new File(outputs.preview), ExportType.PNG24, pngOptions);
     }}
     if (qaPath) {{
-      var overset = [], oversetDetails = [];
+      var overset = [], oversetDetails = [], outOfSafeBoundsDetails = [];
       for (var q = 0; q < doc.textFrames.length; q += 1) {{
         if (String(doc.textFrames[q].name || "") === "__layout_threaded__") continue;
         try {{ if (doc.textFrames[q].hidden) continue; }} catch (hiddenError) {{}}
@@ -1054,13 +1646,32 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
             oversetDetails.push('{{"index":' + q + ',"name":' + jsonString(frame.name) + ',"contents":' + jsonString(frame.contents) + ',"bounds":[' + Number(bounds[0]) + ',' + Number(bounds[1]) + ',' + Number(bounds[2]) + ',' + Number(bounds[3]) + ']}}');
           }}
         }} catch (overflowError) {{}}
+        try {{
+          var changed = replacements.hasOwnProperty(String(q)) || String(doc.textFrames[q].name || "") === "__layout_generated_text__";
+          if (!changed) continue;
+          var checked = doc.textFrames[q].visibleBounds, centerX = (Number(checked[0]) + Number(checked[2])) / 2;
+          var centerY = (Number(checked[1]) + Number(checked[3])) / 2, artboardIndex = -1, safe = null;
+          for (var ab = 0; ab < doc.artboards.length; ab += 1) {{
+            var rect = doc.artboards[ab].artboardRect;
+            if (centerX >= Number(rect[0]) && centerX <= Number(rect[2]) && centerY <= Number(rect[1]) && centerY >= Number(rect[3])) {{
+              artboardIndex = ab;
+              var configured = layoutRules.pages && ab < layoutRules.pages.length ? layoutRules.pages[ab].safeBounds : null;
+              var configuredMatches = configured && configured.length === 4 && Number(configured[0]) >= Number(rect[0]) && Number(configured[2]) <= Number(rect[2]) && Number(configured[1]) <= Number(rect[1]) && Number(configured[3]) >= Number(rect[3]);
+              safe = configuredMatches ? configured : [Number(rect[0]) + 14, Number(rect[1]) - 14, Number(rect[2]) - 14, Number(rect[3]) + 14];
+              break;
+            }}
+          }}
+          if (safe && (Number(checked[0]) < Number(safe[0]) - 0.5 || Number(checked[1]) > Number(safe[1]) + 0.5 || Number(checked[2]) > Number(safe[2]) + 0.5 || Number(checked[3]) < Number(safe[3]) - 0.5)) {{
+            outOfSafeBoundsDetails.push('{{"index":' + q + ',"artboardIndex":' + artboardIndex + ',"contents":' + jsonString(doc.textFrames[q].contents) + ',"bounds":[' + Number(checked[0]) + ',' + Number(checked[1]) + ',' + Number(checked[2]) + ',' + Number(checked[3]) + '],"safeBounds":[' + Number(safe[0]) + ',' + Number(safe[1]) + ',' + Number(safe[2]) + ',' + Number(safe[3]) + ']}}');
+          }}
+        }} catch (safeBoundsError) {{}}
       }}
       var adjustmentJson = [], violationJson = [], unresolvedJson = [], continuationJson = [];
       for (var la = 0; la < layoutAdjustments.length; la += 1) adjustmentJson.push(jsonString(layoutAdjustments[la]));
       for (var lv = 0; lv < layoutViolations.length; lv += 1) violationJson.push(jsonString(layoutViolations[lv]));
       for (var lu = 0; lu < unresolvedNamedObjects.length; lu += 1) unresolvedJson.push(jsonString(unresolvedNamedObjects[lu]));
       for (var lc = 0; lc < continuationRequests.length; lc += 1) continuationJson.push(jsonString(continuationRequests[lc]));
-      writeText(qaPath, '{{"oversetTextFrames":[' + overset.join(",") + '],"oversetDetails":[' + oversetDetails.join(",") + '],"fontFallbacks":[' + styleFallbacks.join(",") + '],"layoutAdjustments":[' + adjustmentJson.join(",") + '],"layoutViolations":[' + violationJson.join(",") + '],"unresolvedNamedObjects":[' + unresolvedJson.join(",") + '],"continuationRequests":[' + continuationJson.join(",") + ']}}');
+      writeText(qaPath, '{{"oversetTextFrames":[' + overset.join(",") + '],"oversetDetails":[' + oversetDetails.join(",") + '],"outOfSafeBoundsDetails":[' + outOfSafeBoundsDetails.join(",") + '],"fontFallbacks":[' + styleFallbacks.join(",") + '],"layoutAdjustments":[' + adjustmentJson.join(",") + '],"layoutViolations":[' + violationJson.join(",") + '],"unresolvedNamedObjects":[' + unresolvedJson.join(",") + '],"continuationRequests":[' + continuationJson.join(",") + ']}}');
     }}
   }} finally {{
     doc.close(SaveOptions.DONOTSAVECHANGES);
@@ -1087,7 +1698,11 @@ def render_job(
     *,
     execute: bool = True,
     system: str | None = None,
+    driver: IllustratorDriver | None = None,
+    allowed_output_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
+    started_at = utc_now()
+    started_monotonic = time.monotonic()
     job = load_job(value)
     source_value = job.get("source") or job.get("source_path") or job.get("input")
     if isinstance(source_value, Mapping):
@@ -1102,6 +1717,7 @@ def render_job(
         raise WorkerError(f"Source hash mismatch: expected {expected_hash}, got {actual_hash}")
 
     job_id = str(job.get("id") or job.get("job_id") or uuid.uuid4().hex[:12])
+    execution_id = uuid.uuid4().hex
     output_dir = resolve_path(str(job.get("output_dir") or (source.parent / "renders" / job_id)))
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(str(job.get("output_name") or f"{source.stem}-rendered-{job_id}")).name
@@ -1125,10 +1741,19 @@ def render_job(
         else:
             outputs[key] = output_dir / f"{stem}{suffixes[key]}"
 
-    overwrite = bool(job.get("overwrite", False))
-    for output in outputs.values():
+    overwrite_value = job.get("overwrite", False)
+    if not isinstance(overwrite_value, bool):
+        raise WorkerError("overwrite must be a boolean")
+    overwrite = overwrite_value
+    output_root = resolve_path(allowed_output_root) if allowed_output_root is not None else None
+    output_keys = [str(path).casefold() for path in outputs.values()]
+    if len(output_keys) != len(set(output_keys)):
+        raise WorkerError("Render outputs must resolve to unique paths")
+    for key, output in outputs.items():
+        if output.suffix.lower() != suffixes[key]:
+            raise WorkerError(f"Output for {key} must use the {suffixes[key]} extension")
         output.parent.mkdir(parents=True, exist_ok=True)
-        validate_output(source, output, overwrite=overwrite)
+        validate_output(source, output, overwrite=overwrite, allowed_root=output_root)
     replacements = _job_replacements(job)
     layout_texts = _job_layout_texts(job)
     guards = _job_guards(job)
@@ -1136,6 +1761,47 @@ def render_job(
     asset_bindings = job.get("assetBindings") or job.get("asset_bindings") or []
     if not isinstance(asset_bindings, Sequence) or isinstance(asset_bindings, (str, bytes)):
         raise WorkerError("assetBindings must be an array")
+    seen_asset_slots: set[str] = set()
+    seen_asset_targets: set[tuple[str, int]] = set()
+    supported_asset_modes = {"replace_placed", "replace_group_with_raster", "replace_group_with_vector", "hide_when_empty"}
+    supported_asset_fits = {"contain", "cover", "stretch", "hide"}
+    quality_issues: list[dict[str, Any]] = []
+    for raw_binding in asset_bindings:
+        if not isinstance(raw_binding, Mapping):
+            raise WorkerError("Each asset binding must be an object")
+        slot_id = str(raw_binding.get("slotId") or "").strip()
+        if not slot_id or slot_id in seen_asset_slots:
+            raise WorkerError(f"Asset slot id is empty or duplicated: {slot_id}")
+        seen_asset_slots.add(slot_id)
+        mode = str(raw_binding.get("mode") or "")
+        fit = str(raw_binding.get("fit") or "contain")
+        if mode not in supported_asset_modes:
+            raise WorkerError(f"Unsupported asset binding mode: {mode}")
+        if fit not in supported_asset_fits:
+            raise WorkerError(f"Unsupported asset fit: {fit}")
+        refs = raw_binding.get("objectRefs") or []
+        if not isinstance(refs, Sequence) or isinstance(refs, (str, bytes)):
+            raise WorkerError(f"Asset slot {slot_id} objectRefs must be an array")
+        for ref in refs:
+            if not isinstance(ref, Mapping) or "type" not in ref or "value" not in ref:
+                raise WorkerError(f"Asset slot {slot_id} has an invalid object reference")
+            target = (str(ref["type"]), int(ref["value"]))
+            if target in seen_asset_targets:
+                raise WorkerError(f"Asset target is bound more than once: {target[0]} {target[1]}")
+            seen_asset_targets.add(target)
+        asset_path = str(raw_binding.get("path") or "")
+        if asset_path:
+            resolved_asset = resolve_path(asset_path)
+            if not resolved_asset.is_file():
+                raise WorkerError(f"Replacement image not found: {resolved_asset}")
+            expected_asset_hash = str(raw_binding.get("sha256") or "")
+            if expected_asset_hash and source_metadata(resolved_asset)["sha256"] != expected_asset_hash:
+                raise WorkerError(f"Replacement image hash mismatch for slot {slot_id}")
+            dpi_issue = asset_dpi_issue(raw_binding, resolved_asset)
+            if dpi_issue:
+                quality_issues.append(dpi_issue)
+        elif raw_binding.get("required") and mode != "hide_when_empty":
+            raise WorkerError(f"Required asset slot is empty: {slot_id}")
     layout_rules = job.get("layoutRules") or job.get("layout_rules") or {}
     if not isinstance(layout_rules, Mapping):
         raise WorkerError("layoutRules must be an object")
@@ -1143,38 +1809,67 @@ def render_job(
     if preview_artboard < 0:
         raise WorkerError("previewArtboard must be zero or greater")
     qa_path = output_dir / f"{safe_job_id}-layout-qa.json"
-    jsx_path = write_jsx(build_render_jsx(source, outputs, replacements, guards, styles, asset_bindings, layout_rules, qa_path, preview_artboard, layout_texts), output_dir, "render-job-")
+    execution_outputs = outputs
+    execution_qa_path = qa_path
+    staging_dir: Path | None = None
+    if execute:
+        staging_dir = output_dir / f".staging-{safe_job_id}-{uuid.uuid4().hex[:8]}"
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        execution_outputs = {key: staging_dir / path.name for key, path in outputs.items()}
+        execution_qa_path = staging_dir / qa_path.name
+    jsx_path = write_jsx(build_render_jsx(source, execution_outputs, replacements, guards, styles, asset_bindings, layout_rules, execution_qa_path, preview_artboard, layout_texts), output_dir, "render-job-")
     result: dict[str, Any] = {
+        "schema": WORKER_RESULT_SCHEMA,
         "jobId": job_id,
+        "executionId": execution_id,
+        "status": "prepared",
+        "startedAt": started_at,
         "source": str(source),
         "outputs": {key: str(path) for key, path in outputs.items()},
         "replacementCount": len(replacements),
         "layoutTextReplacementCount": len(layout_texts),
-        "assetReplacementCount": len([item for item in asset_bindings if isinstance(item, Mapping) and item.get("mode") == "replace_placed"]),
+        "assetReplacementCount": len([item for item in asset_bindings if isinstance(item, Mapping) and item.get("path")]),
         "layoutRulePages": len(layout_rules.get("pages") or []),
         "jsx": str(jsx_path),
         "qaReport": str(qa_path),
         "executed": False,
+        "qualityIssues": quality_issues,
     }
     if execute:
-        if overwrite:
-            for output in outputs.values():
-                if output.exists():
-                    output.unlink()
-        result["automation"] = run_jsx(jsx_path, system=system)
+        try:
+            result["automation"] = run_jsx(jsx_path, system=system, driver=driver)
+        except Exception:
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        final_source_hash = source_metadata(source)["sha256"]
+        if final_source_hash != actual_hash:
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            raise WorkerError(
+                f"Source file changed during Illustrator execution: expected {actual_hash}, got {final_source_hash}"
+            )
         result["executed"] = True
-        missing = [str(path) for path in outputs.values() if not path.exists()]
+        missing = [str(path) for path in execution_outputs.values() if not path.exists()]
         if missing:
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
             raise WorkerError(f"Illustrator completed without creating outputs: {', '.join(missing)}")
+        if staging_dir:
+            for key, staged in execution_outputs.items():
+                os.replace(staged, outputs[key])
+            if execution_qa_path.exists():
+                os.replace(execution_qa_path, qa_path)
+            shutil.rmtree(staging_dir, ignore_errors=True)
         qa_data = json.loads(qa_path.read_text(encoding="utf-8-sig")) if qa_path.exists() else {}
         created_artboards = len([
             item for item in qa_data.get("layoutAdjustments", [])
             if ":created-continuation-artboard-" in str(item)
             or ":moved-to-artboard-" in str(item)
+            or ":inserted-artboard-" in str(item)
             or str(item) == "print-policy:blank-artboard-appended"
         ])
         artifacts = []
-        quality_issues = []
         source_pdf_meta: dict[str, Any] = {}
         pdfinfo = find_binary("pdfinfo")
         if pdfinfo:
@@ -1197,14 +1892,7 @@ def render_job(
             artifacts.append({"type": "preview_png" if key == "preview" else key, "path": str(output), "sha256": source_metadata(output)["sha256"], "metadata": metadata})
         if qa_path.exists():
             artifacts.append({"type":"layout_qa","path":str(qa_path),"sha256":source_metadata(qa_path)["sha256"],"metadata":qa_data})
-            if qa_data.get("oversetTextFrames"):
-                quality_issues.append({"level":"blocking","type":"text_overflow","message":f"Overset TextFrames: {qa_data['oversetTextFrames']}","status":"open"})
-            if qa_data.get("layoutViolations"):
-                quality_issues.append({"level":"blocking","type":"layout_rule_violation","message":f"Layout rule violations: {qa_data['layoutViolations']}","status":"open"})
-            if qa_data.get("unresolvedNamedObjects"):
-                quality_issues.append({"level":"warning","type":"layout_binding_missing","message":f"Unresolved named objects: {qa_data['unresolvedNamedObjects']}","status":"open"})
-            if qa_data.get("continuationRequests"):
-                quality_issues.append({"level":"warning","type":"layout_continuation_required","message":f"New artboard required: {qa_data['continuationRequests']}","status":"open"})
+            quality_issues.extend(qa_quality_issues(qa_data))
         pdf_output = outputs.get("pdf")
         pdftoppm = find_binary("pdftoppm")
         if pdf_output and pdftoppm:
@@ -1229,57 +1917,31 @@ def render_job(
                         quality_issues.append({"level":"blocking","type":"old_text_residue","message":f"Old text remains for slot {item.get('slotId')}: {old[:60]}","status":"open"})
                     if 5 <= len(new) <= 100 and new not in text:
                         quality_issues.append({"level":"warning","type":"target_text_not_extractable","message":f"Target text not found in PDF layer for slot {item.get('slotId')}","status":"open"})
-        for binding in asset_bindings:
-            if isinstance(binding, Mapping) and binding.get("mode") != "replace_placed":
-                quality_issues.append({"level": "warning", "type": "manual_asset", "message": f"Asset slot {binding.get('slotId')} requires manual handling", "status": "open"})
         result["artifacts"] = artifacts
         result["qualityIssues"] = quality_issues
+        result["status"] = "succeeded"
+    result["finishedAt"] = utc_now()
+    result["durationMs"] = round((time.monotonic() - started_monotonic) * 1000)
     return result
 
 
-def doctor_report(*, probe: bool = False, system: str | None = None) -> dict[str, Any]:
+def doctor_report(
+    *,
+    probe: bool = False,
+    system: str | None = None,
+    driver: IllustratorDriver | None = None,
+) -> dict[str, Any]:
     current_system = system or platform.system()
-    report: dict[str, Any] = {
-        "ok": False,
+    selected = driver or default_driver(system=current_system)
+    driver_report = selected.doctor(probe=probe)
+    return {
+        **driver_report,
         "workerVersion": WORKER_VERSION,
         "platform": current_system,
         "platformDetail": platform.platform(),
         "python": sys.executable,
         "hostname": socket.gethostname(),
-        "checks": {},
     }
-    checks = report["checks"]
-    if current_system == "Darwin":
-        app = find_illustrator_app()
-        osascript = shutil.which("osascript")
-        checks.update({"illustratorApp": str(app) if app else None, "osascript": osascript})
-        report["ok"] = bool(app and osascript)
-        if probe and report["ok"]:
-            result = _run(
-                [osascript, "-e", f'tell application "{APP_SCRIPT_NAME}" to get version'],
-                timeout=30,
-            )
-            checks["automationProbe"] = {
-                "ok": result.returncode == 0,
-                "version": result.stdout.strip() or None,
-                "error": result.stderr.strip() or None,
-            }
-            report["ok"] = result.returncode == 0
-    elif current_system == "Windows":
-        powershell = shutil.which("pwsh") or shutil.which("powershell")
-        probe_script = Path(__file__).with_name("windows_vm_probe.ps1")
-        checks.update({"powershell": powershell, "probeScript": str(probe_script) if probe_script.exists() else None})
-        report["ok"] = bool(powershell and probe_script.exists())
-        if probe and report["ok"]:
-            result = _run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe_script), "-Json"], timeout=60)
-            try:
-                checks["automationProbe"] = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                checks["automationProbe"] = {"ok": False, "error": result.stderr.strip() or result.stdout.strip()}
-            report["ok"] = result.returncode == 0 and bool(checks["automationProbe"].get("ok"))
-    else:
-        checks["error"] = f"Unsupported platform: {current_system}"
-    return report
 
 
 class HttpJsonClient:
@@ -1313,16 +1975,26 @@ class HttpJsonClient:
 
     def download(self, url_or_path: str, destination: Path, *, worker_id: str | None = None, lease_token: str | None = None) -> Path:
         url = url_or_path if url_or_path.startswith(("http://", "https://")) else f"{self.base_url}/{url_or_path.lstrip('/')}"
+        base = urllib.parse.urlsplit(self.base_url)
+        target = urllib.parse.urlsplit(url)
+        base_port = base.port or (443 if base.scheme == "https" else 80)
+        target_port = target.port or (443 if target.scheme == "https" else 80)
+        if target.scheme != base.scheme or target.hostname != base.hostname or target_port != base_port:
+            raise WorkerError(f"Cross-origin worker download is not allowed: {target.scheme}://{target.netloc}")
         headers = {"User-Agent": f"illustrator-worker/{WORKER_VERSION}"}
         if self.token: headers["Authorization"] = f"Bearer {self.token}"
         if worker_id: headers["X-Worker-Id"] = worker_id
         if lease_token: headers["X-Lease-Token"] = lease_token
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=max(self.timeout, 120)) as response:
+            class RejectRedirects(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+                    raise WorkerError(f"Worker download redirects are not allowed: {newurl}")
+            opener = urllib.request.build_opener(RejectRedirects())
+            with opener.open(urllib.request.Request(url, headers=headers), timeout=max(self.timeout, 120)) as response:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with destination.open("wb") as handle: shutil.copyfileobj(response, handle)
             return destination
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, OSError, WorkerError) as exc:
             raise WorkerError(f"Download {url} failed: {exc}") from exc
 
     def upload(self, path: str, source: Path, artifact_type: str, *, worker_id: str | None = None, lease_token: str | None = None) -> Any:
@@ -1422,6 +2094,7 @@ class RemoteWorkerClient:
         job_id = str(job.get("id") or job.get("job_id"))
         lease_token = str(job.get("leaseToken")) if job.get("leaseToken") else None
         stop = threading.Event()
+        lease_lost = threading.Event()
         work_dir: Path | None = None
 
         def send_heartbeats() -> None:
@@ -1429,7 +2102,8 @@ class RemoteWorkerClient:
                 try:
                     self.heartbeat(job_id, lease_token)
                 except WorkerError:
-                    pass
+                    lease_lost.set()
+                    return
 
         self.heartbeat(job_id, lease_token)
         thread = threading.Thread(target=send_heartbeats, name=f"heartbeat-{job_id}", daemon=True)
@@ -1437,17 +2111,25 @@ class RemoteWorkerClient:
         try:
             job_type = str(job.get("type") or job.get("command") or "render")
             payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else job
+            if not isinstance(payload, Mapping) or not payload.get("sourceUrl"):
+                raise WorkerError("Remote Illustrator jobs must provide a same-origin sourceUrl")
+            if any(key in payload for key in ("jsx", "script", "executeJsx", "execute_jsx")):
+                raise WorkerError("Remote jobs may not provide raw JSX or script source")
             if isinstance(payload, Mapping) and payload.get("sourceUrl"):
                 work_dir=Path(tempfile.mkdtemp(prefix=f"illustrator-job-{job_id}-"));payload=dict(payload)
                 source_name=Path(urllib.parse.urlparse(str(payload["sourceUrl"])).path).name or "source.ai"
                 if Path(source_name).suffix.lower() not in {".ai",".ait",".eps",".pdf"}: source_name="source.ai"
                 payload["source"]=str(self.http.download(str(payload["sourceUrl"]),work_dir/source_name,worker_id=self.worker_id,lease_token=lease_token));payload["output_dir"]=str(work_dir/"outputs")
+                payload.pop("outputs", None)
+                payload["overwrite"] = False
                 bindings=[]
                 for index,binding in enumerate(payload.get("assetBindings") or []):
                     item=dict(binding)
                     if item.get("downloadUrl"):
                         suffix=Path(str(item.get("name") or "")).suffix or Path(urllib.parse.urlparse(str(item["downloadUrl"])).path).suffix or ".bin"
                         item["path"]=str(self.http.download(str(item["downloadUrl"]),work_dir/"assets"/f"asset-{index}{suffix}",worker_id=self.worker_id,lease_token=lease_token))
+                    elif item.get("path"):
+                        raise WorkerError(f"Remote asset slot {item.get('slotId')} must use downloadUrl")
                     bindings.append(item)
                 payload["assetBindings"]=bindings
             if job_type in {"extract-template", "extract_template"}:
@@ -1459,23 +2141,36 @@ class RemoteWorkerClient:
             elif job_type in {"render", "render-job", "render_job"}:
                 render_payload = dict(payload)
                 render_payload.setdefault("id", job_id)
-                result = render_job(render_payload)
+                result = render_job(render_payload, allowed_output_root=work_dir / "outputs")
             else:
                 raise WorkerError(f"Unsupported remote job type: {job_type}")
+            if lease_lost.is_set():
+                raise IndeterminateWorkerError("Worker lease heartbeat failed while Illustrator was running; result was not published")
             if work_dir and result.get("artifacts"):
                 uploaded=[]
                 for artifact in result["artifacts"]:
                     server_artifact=self.http.upload(f"/jobs/{urllib.parse.quote(job_id,safe='')}/artifacts",Path(artifact["path"]),str(artifact.get("type") or "other"),worker_id=self.worker_id,lease_token=lease_token);uploaded.append(server_artifact)
                 result["artifacts"]=uploaded
-            self.complete(job_id, status="succeeded", result=result, lease_token=lease_token)
-            return result
+            issues = list(result.get("qualityIssues") or [])
+            public_result = {
+                "schema": WORKER_RESULT_SCHEMA,
+                "jobId": job_id,
+                "executionId": result.get("executionId"),
+                "status": "succeeded",
+                "artifacts": list(result.get("artifacts") or []),
+                "qualityGate": {"status": "blocked" if any(item.get("level") == "blocking" for item in issues) else "passed", "issues": issues},
+                "completedAt": utc_now(),
+            }
+            self.complete(job_id, status="succeeded", result=public_result, lease_token=lease_token)
+            return public_result
         except Exception as exc:
-            error = {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc(limit=20)}
+            final_status = "indeterminate" if isinstance(exc, IndeterminateWorkerError) else "failed"
+            error = {"type": type(exc).__name__, "message": str(exc), "retryable": False}
             try:
-                self.complete(job_id, status="failed", error=error, lease_token=lease_token)
+                self.complete(job_id, status=final_status, error=error, lease_token=lease_token)
             except Exception as completion_exc:
                 error["completionError"] = str(completion_exc)
-            return {"jobId": job_id, "status": "failed", "error": error}
+            return {"jobId": job_id, "status": final_status, "error": error}
         finally:
             stop.set()
             thread.join(timeout=min(self.heartbeat_interval + 1, 5))

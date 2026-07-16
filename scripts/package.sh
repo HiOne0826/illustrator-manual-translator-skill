@@ -15,7 +15,6 @@ mkdir -p "$DIST_DIR"
 rm -f "$ZIP_PATH"
 
 cd "$ROOT_DIR/skills"
-zip -qr "$ZIP_PATH" "$SKILL_NAME"
+zip -qr "$ZIP_PATH" "$SKILL_NAME" -x '*/__pycache__/*' '*.pyc'
 
 echo "$ZIP_PATH"
-

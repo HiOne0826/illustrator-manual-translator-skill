@@ -44,7 +44,7 @@ Recommended checks:
 
 ## Automation Permissions
 
-On macOS, `osascript` may require permission to control Adobe Illustrator. If automation fails on first run, grant the terminal or agent app permission in System Settings.
+The execution layer supports macOS only. `osascript` may require permission to control Adobe Illustrator. If the real doctor probe fails on first run, grant the terminal or agent app permission in System Settings and rerun it. Windows COM/PowerShell automation is intentionally unsupported.
 
 ## Excel Runtime
 

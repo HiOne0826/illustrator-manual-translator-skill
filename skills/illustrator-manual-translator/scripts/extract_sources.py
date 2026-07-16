@@ -21,8 +21,11 @@ from xml.etree import ElementTree as ET
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 P_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 S_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_W = {"w": W_NS}
+NS_DOCX = {"w": W_NS, "r": R_NS, "a": A_NS, "wp": WP_NS}
 NS_S = {"s": S_NS, "r": R_NS}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
 
@@ -196,7 +199,7 @@ class CanonicalExtractor:
             "rows": padded,
         })
 
-    def _add_asset(self, source_id: str, name: str, data: bytes, location: str) -> None:
+    def _add_asset(self, source_id: str, name: str, data: bytes, location: str) -> dict:
         width, height = _image_size(data)
         digest = _sha256(data)
         extracted_path = None
@@ -206,7 +209,7 @@ class CanonicalExtractor:
             if not target.exists():
                 target.write_bytes(data)
             extracted_path = str(target)
-        self.document["assets"].append({
+        item = {
             "id": "asset-%03d" % (len(self.document["assets"]) + 1),
             "source_id": source_id,
             "name": Path(name).name,
@@ -217,23 +220,100 @@ class CanonicalExtractor:
             "path": extracted_path,
             "width": width,
             "height": height,
-        })
+            "format": Path(name).suffix.lower().lstrip(".") or None,
+            "has_alpha": bool(data.startswith(b"\x89PNG") and len(data) > 25 and data[25] in (4, 6)) if data.startswith(b"\x89PNG") else False,
+            "aspect_ratio": round(width / height, 6) if width and height else None,
+            "occurrences": [],
+            "slot_hints": [],
+        }
+        self.document["assets"].append(item)
+        return item
+
+    def _visual_marker_evidence(self, source_id: str, text: str, paragraph: int, slot_id: str | None) -> dict:
+        item = {
+            "id": "evidence-%04d" % (len(self.document["evidence"]) + 1),
+            "kind": "visual_asset_marker", "field": "visual_asset", "value": text,
+            "slot_id": slot_id, "source_id": source_id,
+            "location": {"part": "word/document.xml", "paragraph": paragraph},
+        }
+        self.document["evidence"].append(item)
+        return item
 
     def _extract_docx(self, path: Path, source_id: str) -> None:
         with zipfile.ZipFile(str(path)) as archive:
+            names = set(archive.namelist())
+            assets_by_part = {}
+            for name in sorted(n for n in names if n.startswith("word/media/")):
+                assets_by_part[posixpath.normpath(name)] = self._add_asset(source_id, name, archive.read(name), name)
+            relationships = {}
+            if "word/_rels/document.xml.rels" in names:
+                rel_root = ET.fromstring(archive.read("word/_rels/document.xml.rels"))
+                relationships = {
+                    str(rel.get("Id")): posixpath.normpath(posixpath.join("word", str(rel.get("Target") or "")))
+                    for rel in rel_root.findall("{%s}Relationship" % P_NS)
+                }
             root = ET.fromstring(archive.read("word/document.xml"))
             body = root.find("w:body", NS_W)
             paragraph_number = table_number = 0
+            last_image_occurrences: List[dict] = []
+            claimed_slots: Dict[str, dict] = {}
             if body is not None:
                 for child in body:
                     name = _local_name(child.tag)
                     if name == "p":
                         paragraph_number += 1
-                        self._add_paragraph(
-                            source_id, _text(child, W_NS),
-                            {"part": "word/document.xml", "paragraph": paragraph_number},
-                        )
+                        text = _text(child, W_NS)
+                        occurrences = []
+                        for drawing in child.findall(".//w:drawing", NS_DOCX):
+                            extent = drawing.find(".//wp:extent", NS_DOCX)
+                            for blip in drawing.findall(".//a:blip", NS_DOCX):
+                                rel_id = blip.get("{%s}embed" % R_NS) or ""
+                                asset = assets_by_part.get(relationships.get(rel_id, ""))
+                                if not asset:
+                                    continue
+                                cx = int(extent.get("cx", "0")) if extent is not None else 0
+                                cy = int(extent.get("cy", "0")) if extent is not None else 0
+                                occurrence = {
+                                    "id": "asset-occurrence-%04d" % (sum(len(a["occurrences"]) for a in self.document["assets"]) + 1),
+                                    "part": "word/document.xml", "paragraph": paragraph_number,
+                                    "relationship_id": rel_id, "display_width_emu": cx or None, "display_height_emu": cy or None,
+                                    "effective_dpi_x": round(asset["width"] * 914400 / cx, 1) if asset.get("width") and cx else None,
+                                    "effective_dpi_y": round(asset["height"] * 914400 / cy, 1) if asset.get("height") and cy else None,
+                                }
+                                asset["occurrences"].append(occurrence)
+                                occurrences.append({"asset": asset, "occurrence": occurrence})
+                        marker = re.fullmatch(r"\s*\[ASSET:\s*([a-z0-9][a-z0-9._-]*)\s*\]\s*", text, flags=re.I)
+                        if marker:
+                            slot_id = marker.group(1).lower()
+                            evidence = self._visual_marker_evidence(source_id, text, paragraph_number, slot_id)
+                            if slot_id in claimed_slots:
+                                self._add_conflict("duplicate_asset_slot_marker", "visual_asset", "high", slot_id,
+                                                   "同一图片槽位被重复标记。", [claimed_slots[slot_id], evidence], [{"slot_id": slot_id}])
+                            elif len(last_image_occurrences) == 1:
+                                link = last_image_occurrences[0]
+                                hint = {"slot_id": slot_id, "marker": text,
+                                        "marker_location": evidence["location"], "occurrence_id": link["occurrence"]["id"]}
+                                link["asset"]["slot_hints"].append(hint)
+                                claimed_slots[slot_id] = evidence
+                            else:
+                                code = "ambiguous_asset_marker" if len(last_image_occurrences) > 1 else "asset_marker_without_image"
+                                message = "图片标记前一个图片段落包含多张图片。" if last_image_occurrences else "图片标记前没有可绑定的单图段落。"
+                                self._add_conflict(code, "visual_asset", "high", slot_id, message, [evidence], [{"slot_id": slot_id}])
+                            last_image_occurrences = []
+                            continue
+                        if "[ASSET:" in text.upper():
+                            evidence = self._visual_marker_evidence(source_id, text, paragraph_number, None)
+                            self._add_conflict("invalid_asset_marker", "visual_asset", "high", "visual_asset",
+                                               "图片标记格式无效。", [evidence], [{"marker": text}])
+                            last_image_occurrences = []
+                            continue
+                        self._add_paragraph(source_id, text, {"part": "word/document.xml", "paragraph": paragraph_number})
+                        if occurrences:
+                            last_image_occurrences = occurrences
+                        elif text.strip():
+                            last_image_occurrences = []
                     elif name == "tbl":
+                        last_image_occurrences = []
                         table_number += 1
                         rows = []
                         for row in child.findall("w:tr", NS_W):
@@ -242,8 +322,6 @@ class CanonicalExtractor:
                             source_id, rows,
                             {"part": "word/document.xml", "table": table_number},
                         )
-            for name in sorted(n for n in archive.namelist() if n.startswith("word/media/")):
-                self._add_asset(source_id, name, archive.read(name), name)
 
     def _extract_xlsx(self, path: Path, source_id: str) -> None:
         with zipfile.ZipFile(str(path)) as archive:

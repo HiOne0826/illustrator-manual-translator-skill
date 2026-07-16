@@ -1,0 +1,566 @@
+{
+  "schemaVersion": "layout-rules/0.1",
+  "templateSha256": "77bf787901c44e21d705009b416c66ad48e4a01abb546fb6b26efc109eac2d02",
+  "visualSlots": [
+    {"id": "brand.logo.cover", "name": "封面 Logo（留空保留模板默认）", "role": "brand-logo", "objectRefs": [{"type": "groupItem", "value": 17}], "bounds": [475.601967300392, -55.337517718408, 542.425113946247, -121.245857550901], "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 300},
+    {"id": "brand.logo.footer", "name": "联系方式区 Logo 图形（留空保留模板默认）", "role": "brand-logo", "objectRefs": [{"type": "compoundPathItem", "value": 1}], "bounds": [66.208297729491, -510.637832641598, 102.935302734381, -546.860828399655], "replacementMode": "replace_group_with_vector", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 300},
+    {"id": "product.hero", "name": "封面产品主图", "role": "product-hero", "objectRefs": [{"type": "groupItem", "value": 4}], "bounds": [505.027619361877, -192.578531266265, 757.147614479065, -536.138528824858], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200},
+    {"id": "cover.gallery.1", "name": "封面产品图左上", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 16}], "bounds": [88.171057222996, -147.610775428333, 150.499970534034, -222.156121200565], "labelTextFrame": {"index": 61, "sourceText": "FT-889", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -234.7109375, 133.501953125, -243.310546875]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.2", "name": "封面产品图右上", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 13}], "bounds": [276.34538802306, -149.103470801014, 326.873347999443, -220.663425827885], "labelTextFrame": {"index": 59, "sourceText": "FT-838", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [289.416015625, -234.71142578125, 315.775390625, -243.31103515625]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.3", "name": "封面产品图左下", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 15}], "bounds": [90.5971443734, -257.466001169877, 148.073883383629, -338.300022428102], "labelTextFrame": {"index": 60, "sourceText": "FT-802", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -349.0146484375, 133.501953125, -357.6142578125]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.4", "name": "封面产品图右下", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 14}], "bounds": [261.104206249, -256.529908401895, 342.114529773504, -339.236115196081], "labelTextFrame": {"index": 62, "sourceText": "FT-833E", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [286.9482421875, -350.236328125, 318.6435546875, -358.8359375]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "diagram.product-structure", "name": "产品结构图", "role": "product-structure-diagram", "objectRefs": [{"type": "groupItem", "value": 3}], "bounds": [56.880859375, -707.858068771004, 364.0634765625, -1065.181640625], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200},
+    {"id": "diagram.assembly", "name": "安装图", "role": "assembly-diagram", "objectRefs": [{"type": "groupItem", "value": 1}], "bounds": [974.107478882927, -750.607496136077, 1125.15752065286, -996.698034591316], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200}
+  ],
+  "typographyPolicy": {
+    "bodyFontSize": "fixed-template-standard",
+    "bodyFontSizePt": 8.5,
+    "bodyLeadingPt": 12.75,
+    "minLeadingRatio": 1.5,
+    "overflowStrategy": ["resize_text_frame", "adjust_gap", "move_content", "new_artboard", "manual_review"]
+  },
+  "virtualTextSlots": [
+    {
+      "id": "layout_cover_new_generation_title",
+      "objectType": "layoutText",
+      "objectIndex": 1000000,
+      "sourceText": "New Generation",
+      "semanticKey": "cover.new_generation.title",
+      "mode": "variable",
+      "bounds": [712.7547, -167.5284, 794.181, -236.618],
+      "fontName": "TimesNewRomanPSMT",
+      "fontSize": 22,
+      "maxCharacters": 80,
+      "allowTemplateDefault": true
+    },
+    {
+      "id": "layout_page4_service_support_title",
+      "objectType": "layoutText",
+      "objectIndex": 1000001,
+      "sourceText": "Service Support",
+      "semanticKey": "section.service_support.title",
+      "mode": "variable",
+      "bounds": [1311.9331, -790.4436, 1525.2443, -819.1546],
+    "fontName": "ArialMT",
+      "fontSize": 30,
+      "maxCharacters": 80,
+      "allowTemplateDefault": true
+    }
+  ],
+  "printPolicy": {
+    "requireEvenArtboardCount": true,
+    "oddPageStrategy": "append-blank-artboard"
+  },
+  "pages": [
+    {
+      "artboardIndex": 0,
+      "mode": "anchored",
+      "translationPolicy": "translate-all",
+      "safeBounds": [20, -20, 821.8898, -575.2756],
+      "regions": [
+        {
+          "id": "cover-brand-header",
+          "role": "fixed-brand",
+          "objectRefs": [
+            { "type": "textFrame", "value": 34 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "movable": false,
+            "resizable": true,
+            "translateText": true,
+            "allowTemplateDefault": false,
+            "maxRightPt": 400,
+            "maxLines": 2,
+            "minFontSizePt": 14,
+            "minHorizontalScale": 85,
+            "wrappedFontSizePt": 14.5,
+            "maxBottomPt": -102,
+            "headerLeftPt": 0,
+            "headerRightPt": 420.9449
+          }
+        },
+        {
+          "id": "cover-new-generation",
+          "role": "outlined-cover-label",
+          "objectRefs": [
+            { "type": "groupItem", "value": 20 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "virtualTitleSlotIndex": 1000000,
+            "sourceTitleText": "New Generation",
+            "titleFontName": "TimesNewRomanPSMT",
+            "titleFontSizePt": 22,
+            "titleMinFontSizePt": 16,
+            "titleMinHorizontalScale": 85,
+            "rotationDegrees": -45,
+            "translateText": true,
+            "movable": false
+          }
+        },
+        {
+          "id": "cover-product-gallery",
+          "role": "adaptive-gallery",
+          "objectRefs": [
+            { "type": "textFrame", "value": 59 },
+            { "type": "textFrame", "value": 60 },
+            { "type": "textFrame", "value": 61 },
+            { "type": "textFrame", "value": 62 },
+            { "type": "groupItem", "value": 13 },
+            { "type": "groupItem", "value": 14 },
+            { "type": "groupItem", "value": 15 },
+            { "type": "groupItem", "value": 16 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "itemCount": { "min": 3, "max": 4 },
+            "layouts": { "3": "2-plus-1-centered", "4": "2-by-2" },
+            "compressible": true,
+            "minScale": 0.82,
+            "compressionTrigger": "manufacturer-info-growth"
+          }
+        },
+        {
+          "id": "cover-distributor-entry",
+          "role": "adaptive-entry-label",
+          "objectRefs": [
+            { "type": "pathItem", "value": 5418 },
+            { "type": "textFrame", "value": 41 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "translateText": true,
+            "cardLeftPt": 112,
+            "cardRightPt": 360,
+            "cardTopPt": -387.8392,
+            "cardBottomPt": -472.2587,
+            "titleMinFontSizePt": 10,
+            "titleMinHorizontalScale": 85
+          }
+        },
+        {
+          "id": "cover-manufacturer-info",
+          "role": "fixed-contact-info",
+          "objectRefs": [
+            { "type": "textFrame", "value": 35 },
+            { "type": "textFrame", "value": 36 },
+            { "type": "textFrame", "value": 37 },
+            { "type": "textFrame", "value": 38 },
+            { "type": "textFrame", "value": 39 },
+            { "type": "textFrame", "value": 40 }
+          ],
+          "anchor": "bottom",
+          "behavior": {
+            "bodyTextFramePositions": [0, 1, 2, 3, 4, 5],
+            "translateText": true,
+            "minFontSizePt": 8.5,
+            "bodyFontSizePt": 8.5,
+            "bodyLeadingPt": 12.75,
+            "preserveOriginalFrames": true
+          }
+        },
+        {
+          "id": "cover-product-identity",
+          "role": "adaptive-product-title",
+          "objectRefs": [
+            { "type": "textFrame", "value": 0 },
+            { "type": "textFrame", "value": 58 },
+            { "type": "groupItem", "value": 17 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "translateText": true,
+            "titleMaxLines": 2,
+            "titleOriginalFontSizePt": 20.4262,
+            "titleMinFontSizePt": 16,
+            "modelMaxLines": 1,
+            "modelMinFontSizePt": 9.5,
+            "overflowStrategy": ["wrap-title", "reduce-font", "manual-review"]
+          }
+        },
+        {
+          "id": "cover-main-visual",
+          "role": "fixed-aspect-main-image",
+          "objectRefs": [
+            { "type": "groupItem", "value": 4 },
+            { "type": "groupItem", "value": 19 },
+            { "type": "textFrame", "value": 33 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "imageFit": "contain",
+            "allowCrop": false,
+            "preserveAspectRatio": true,
+            "translateText": true,
+            "decorationsMovable": false
+          }
+        }
+      ],
+      "visualQa": {
+        "maxIterations": 2,
+        "allowedActions": [
+          "adjust_font_size",
+          "resize_text_frame",
+          "scale_group",
+          "adjust_gap",
+          "scale_image"
+        ],
+        "forbiddenObjectRefs": [
+          "cover.brand.header",
+          "cover.distributor.card",
+          "cover.main.visual.decorations",
+          "page.artboard"
+        ]
+      }
+    },
+    {
+      "artboardIndex": 1,
+      "mode": "vertical-flow",
+      "translationPolicy": "translate-all",
+      "safeBounds": [874.6457, -20, 1676.5354, -550],
+      "continuationPolicy": "new-artboard",
+      "regions": [
+        {
+          "id": "page2-left-decoration",
+          "role": "fixed-decoration",
+          "objectRefs": [
+            { "type": "groupItem", "value": 5 },
+            { "type": "groupItem", "value": 6 }
+          ],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": true }
+        },
+        {
+          "id": "page2-package-inspection",
+          "role": "flow-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 31 },
+            { "type": "textFrame", "value": 32 },
+            { "type": "pathItem", "value": 3527 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "bodyTextFramePositions": [1],
+            "order": 1,
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "bodyMinFontSizePt": 8.5,
+            "bodyMinHeightPt": 24,
+            "bodyMaxHeightPt": 260,
+            "sectionGapPt": 12,
+            "translateText": true
+          }
+        },
+        {
+          "id": "page2-brief-introduction",
+          "role": "flow-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 29 },
+            { "type": "textFrame", "value": 30 },
+            { "type": "pathItem", "value": 3526 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "bodyTextFramePositions": [1],
+            "order": 2,
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "bodyMinFontSizePt": 8.5,
+            "bodyMinHeightPt": 24,
+            "bodyMaxHeightPt": 260,
+            "sectionGapPt": 12,
+            "translateText": true
+          }
+        },
+        {
+          "id": "page2-specification",
+          "role": "flow-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 55 },
+            { "type": "textFrame", "value": 56 },
+            { "type": "pathItem", "value": 5424 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "bodyTextFramePositions": [1],
+            "order": 3,
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "bodyMinFontSizePt": 8.5,
+            "bodyMinHeightPt": 24,
+            "bodyMaxHeightPt": 300,
+            "sectionGapPt": 12,
+            "bodyTopGapPt": 18,
+            "minFirstPanelHeightPt": 24,
+            "maxContinuationArtboards": 10,
+            "titleBarFillCMYK": [0, 0, 0, 57],
+            "variableParameterRows": true,
+            "keepLabelValueUnitTogether": true,
+            "translateText": true
+          }
+        },
+        {
+          "id": "page2-page-number",
+          "role": "fixed-page-number",
+          "objectRefs": [
+            { "type": "textFrame", "value": 57 }
+          ],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": false }
+        }
+      ],
+      "visualQa": {
+        "maxIterations": 2,
+        "allowedActions": [
+          "adjust_font_size",
+          "resize_text_frame",
+          "adjust_gap"
+        ],
+        "forbiddenObjectRefs": [
+          "page2-left-decoration",
+          "page2-page-number",
+          "page.artboard"
+        ]
+      }
+    },
+    {
+      "artboardIndex": 2,
+      "mode": "two-panel-flow",
+      "translationPolicy": "selective",
+      "safeBounds": [20, -629.4488, 821.8898, -1150.9947],
+      "continuationPolicy": "new-artboard",
+      "regions": [
+        {
+          "id": "page3-overview-title",
+          "role": "fixed-panel-title",
+          "objectRefs": [
+            { "type": "textFrame", "value": 42 },
+            { "type": "pathItem", "value": 5419 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "translateText": true,
+            "movable": false
+          }
+        },
+        {
+          "id": "page3-overview-diagram",
+          "role": "fixed-diagram",
+          "objectRefs": [
+            { "type": "groupItem", "value": 3 },
+            { "type": "textFrame", "value": 18 },
+            { "type": "textFrame", "value": 19 },
+            { "type": "textFrame", "value": 20 },
+            { "type": "textFrame", "value": 21 },
+            { "type": "textFrame", "value": 22 },
+            { "type": "textFrame", "value": 23 },
+            { "type": "textFrame", "value": 24 },
+            { "type": "textFrame", "value": 25 },
+            { "type": "textFrame", "value": 26 },
+            { "type": "textFrame", "value": 27 },
+            { "type": "textFrame", "value": 28 }
+          ],
+          "anchor": "fixed",
+          "behavior": {
+            "movable": false,
+            "resizable": false,
+            "translateText": false
+          }
+        },
+        {
+          "id": "page3-parts-list",
+          "role": "balanced-two-column-list",
+          "objectRefs": [
+            { "type": "textFrame", "value": 17 },
+            { "type": "textFrame", "value": 16 },
+            { "type": "groupItem", "value": 2 }
+          ],
+          "anchor": "bottom",
+          "behavior": {
+            "bodyTextFramePositions": [0, 1],
+            "dynamicItemCount": true,
+            "columns": 2,
+            "balance": "count",
+            "itemMaxLines": 2,
+            "columnWidthPt": 260,
+            "minFontSizePt": 8.5,
+            "bottomBound": -1150.9947,
+            "maxUpwardShiftPt": 18,
+            "translateText": true,
+            "overflowStrategy": ["rebalance-columns", "reduce-font", "manual-review"]
+          }
+        },
+        {
+          "id": "page3-overview-page-number",
+          "role": "fixed-page-number",
+          "objectRefs": [
+            { "type": "textFrame", "value": 43 }
+          ],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": false }
+        },
+        {
+          "id": "page3-safety-warning",
+          "role": "continuable-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 53 },
+            { "type": "textFrame", "value": 54 },
+            { "type": "pathItem", "value": 5423 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "bodyTextFramePositions": [1],
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "bodyMinFontSizePt": 8.5,
+            "repeatTitleBar": true,
+            "continuationOnly": true,
+            "continuationLayout": "full-artboard",
+            "maxContinuationArtboards": 10,
+            "translateText": true
+          }
+        },
+        {
+          "id": "page3-safety-page-number",
+          "role": "fixed-page-number",
+          "objectRefs": [
+            { "type": "textFrame", "value": 44 }
+          ],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": false }
+        }
+      ],
+      "visualQa": {
+        "maxIterations": 2,
+        "allowedActions": [
+          "adjust_font_size",
+          "resize_text_frame",
+          "adjust_gap"
+        ],
+        "forbiddenObjectRefs": [
+          "page3-overview-diagram",
+          "page3-overview-page-number",
+          "page3-safety-page-number",
+          "page.artboard"
+        ]
+      }
+    },
+    {
+      "artboardIndex": 3,
+      "mode": "paired-sections-flow",
+      "translationPolicy": "selective",
+      "safeBounds": [874.6457, -629.4488, 1676.5354, -1160.4615],
+      "continuationPolicy": "new-artboard",
+      "regions": [
+        {
+          "id": "page4-assembly",
+          "role": "assembly-flow-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 51 },
+            { "type": "textFrame", "value": 52 },
+            { "type": "pathItem", "value": 5422 }
+          ],
+          "anchor": "top",
+          "behavior": { "bodyTextFramePositions": [1], "order": 1, "titleMaxLines": 1, "titleMinFontSizePt": 30, "bodyMinFontSizePt": 8.5, "bodyMinHeightPt": 24, "bodyMaxHeightPt": 180, "translateText": true }
+        },
+        {
+          "id": "page4-assembly-diagram",
+          "role": "adaptive-contain-diagram",
+          "objectRefs": [
+            { "type": "groupItem", "value": 1 }
+          ],
+          "anchor": "top",
+          "behavior": { "imageFit": "contain", "allowCrop": false, "preserveAspectRatio": true, "minScale": 0.65, "minTopGapPt": 4, "minBottomGapPt": 8 }
+        },
+        {
+          "id": "page4-operation",
+          "role": "continuable-operation-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 49 },
+            { "type": "textFrame", "value": 50 },
+            { "type": "pathItem", "value": 5421 }
+          ],
+          "anchor": "top",
+          "behavior": { "bodyTextFramePositions": [1], "order": 3, "titleMaxLines": 1, "titleMinFontSizePt": 30, "bodyMinFontSizePt": 8.5, "firstPanelBodyMinHeightPt": 42, "repeatTitleBar": true, "continuationOnly": true, "preferSiblingPanel": true, "maxContinuationArtboards": 10, "translateText": true }
+        },
+        {
+          "id": "page4-left-page-number",
+          "role": "fixed-page-number",
+          "objectRefs": [{ "type": "textFrame", "value": 45 }],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": false }
+        },
+        {
+          "id": "page4-maintenance",
+          "role": "maintenance-flow-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 47 },
+            { "type": "textFrame", "value": 48 },
+            { "type": "pathItem", "value": 5420 }
+          ],
+          "anchor": "top",
+          "behavior": { "bodyTextFramePositions": [1], "order": 1, "titleMaxLines": 1, "titleMinFontSizePt": 30, "bodyMinFontSizePt": 8.5, "bodyMinHeightPt": 24, "bodyMaxHeightPt": 180, "sectionGapPt": 18, "translateText": true }
+        },
+        {
+          "id": "page4-service-support",
+          "role": "continuable-service-section",
+          "objectRefs": [
+            { "type": "textFrame", "value": 15 },
+            { "type": "textFrame", "value": 14 },
+            { "type": "textFrame", "value": 13 },
+            { "type": "textFrame", "value": 12 },
+            { "type": "textFrame", "value": 11 },
+            { "type": "textFrame", "value": 10 },
+            { "type": "textFrame", "value": 9 },
+            { "type": "textFrame", "value": 8 },
+            { "type": "textFrame", "value": 7 },
+            { "type": "textFrame", "value": 6 },
+            { "type": "textFrame", "value": 5 },
+            { "type": "textFrame", "value": 4 },
+            { "type": "textFrame", "value": 3 },
+            { "type": "textFrame", "value": 2 },
+            { "type": "textFrame", "value": 1 },
+            { "type": "groupItem", "value": 0 },
+            { "type": "pathItem", "value": 21 },
+            { "type": "compoundPathItem", "value": 0 }
+          ],
+          "anchor": "top",
+          "behavior": {
+            "bodyTextFramePositions": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "order": 2,
+            "virtualTitleSlotIndex": 1000001,
+            "sourceTitleText": "Service Support",
+            "titleFontName": "ArialMT",
+            "titleMaxLines": 1,
+            "titleMinFontSizePt": 30,
+            "titleVerticalAlign": "match-reference-bottom",
+            "titleVerticalReferenceRole": "maintenance-flow-section",
+            "bodyMinFontSizePt": 8.5,
+            "providerCountVariable": true,
+            "allowCardSplitAcrossPages": true,
+            "continuationPanelCount": 2,
+            "continuationPanelIndex": 0,
+            "repeatTitleBar": true,
+            "maxContinuationArtboards": 10,
+            "translateText": true
+          }
+        },
+        {
+          "id": "page4-right-page-number",
+          "role": "fixed-page-number",
+          "objectRefs": [{ "type": "textFrame", "value": 46 }],
+          "anchor": "fixed",
+          "behavior": { "movable": false, "translateText": false }
+        }
+      ],
+      "visualQa": {
+        "maxIterations": 2,
+        "allowedActions": ["adjust_font_size", "resize_text_frame", "scale_group", "adjust_gap"],
+        "forbiddenObjectRefs": ["page4-left-page-number", "page4-right-page-number", "page.artboard"]
+      }
+    }
+  ]
+}
