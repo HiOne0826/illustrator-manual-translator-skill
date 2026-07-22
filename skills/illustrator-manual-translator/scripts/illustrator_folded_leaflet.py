@@ -24,6 +24,8 @@ DEFAULT_GEOMETRY_MM = {
     "trimBottom": 9.19,
     "panelCount": 5,
     "minimumBodyFontPt": 5.0,
+    "contentTopInset": 5.8,
+    "contentBottomInset": 3.7,
 }
 
 
@@ -44,7 +46,10 @@ def _finite_positive(value: Any, label: str) -> float:
 
 def normalize_geometry(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
     geometry = {**DEFAULT_GEOMETRY_MM, **dict(raw or {})}
-    for key in ("mediaWidth", "mediaHeight", "trimLeft", "trimRight", "trimTop", "trimBottom", "minimumBodyFontPt"):
+    for key in (
+        "mediaWidth", "mediaHeight", "trimLeft", "trimRight", "trimTop", "trimBottom",
+        "minimumBodyFontPt", "contentTopInset", "contentBottomInset",
+    ):
         geometry[key] = _finite_positive(geometry[key], key)
     geometry["panelCount"] = int(geometry.get("panelCount") or 0)
     if geometry["panelCount"] != 5:
@@ -55,9 +60,83 @@ def normalize_geometry(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
         raise FoldedLeafletError("Trim margins leave no printable panel area")
     geometry["panelWidth"] = printable_width / geometry["panelCount"]
     geometry["panelHeight"] = printable_height
+    if geometry["contentTopInset"] + geometry["contentBottomInset"] >= printable_height:
+        raise FoldedLeafletError("Content insets leave no usable panel height")
     if abs(geometry["panelWidth"] - 76.0) > 0.05:
         raise FoldedLeafletError("Reference five-fold contract requires 76 mm finished panel width")
     return geometry
+
+
+def _vertical_distribution(
+    item_indexes: Sequence[int],
+    items_by_index: Mapping[int, Mapping[str, Any]],
+    *,
+    source_half_rect: Sequence[float],
+    fit_top: float,
+    target_top: float,
+    panel_height: float,
+    scale: float,
+    content_top_inset: float,
+    content_bottom_inset: float,
+) -> tuple[dict[int, float], bool]:
+    records: list[tuple[int, list[float]]] = []
+    for item_index in item_indexes:
+        raw_bounds = items_by_index.get(int(item_index), {}).get("bounds")
+        if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
+            continue
+        records.append((int(item_index), [float(value) for value in raw_bounds]))
+    if not records:
+        return ({int(item_index): 0.0 for item_index in item_indexes}, False)
+
+    source_top = float(source_half_rect[1])
+    source_bottom = float(source_half_rect[3])
+    content_top = min(source_top, max(bounds[1] for _, bounds in records))
+    content_bottom = max(source_bottom, min(bounds[3] for _, bounds in records))
+    content_height = content_top - content_bottom
+    source_height = source_top - source_bottom
+    eligible = len(records) >= 2 and content_height >= source_height * 0.4
+    if not eligible or content_height <= 0:
+        return ({int(item_index): 0.0 for item_index in item_indexes}, False)
+
+    current_top = fit_top - (source_top - content_top) * scale
+    current_bottom = fit_top - (source_top - content_bottom) * scale
+    desired_top = target_top - content_top_inset
+    desired_bottom = target_top - panel_height + content_bottom_inset
+    top_shift = desired_top - current_top
+    bottom_shift = desired_bottom - current_bottom
+    clusters: list[dict[str, Any]] = []
+    for item_index, bounds in sorted(records, key=lambda item: item[1][1], reverse=True):
+        matching = [
+            cluster for cluster in clusters
+            if bounds[1] >= float(cluster["bottom"]) - 0.75
+            and bounds[3] <= float(cluster["top"]) + 0.75
+        ]
+        if matching:
+            cluster = matching[0]
+            cluster["top"] = max(float(cluster["top"]), bounds[1])
+            cluster["bottom"] = min(float(cluster["bottom"]), bounds[3])
+            cluster["indexes"].append(item_index)
+            for other in matching[1:]:
+                cluster["top"] = max(float(cluster["top"]), float(other["top"]))
+                cluster["bottom"] = min(float(cluster["bottom"]), float(other["bottom"]))
+                cluster["indexes"].extend(other["indexes"])
+                clusters.remove(other)
+        else:
+            clusters.append({"top": bounds[1], "bottom": bounds[3], "indexes": [item_index]})
+
+    shifts: dict[int, float] = {}
+    for cluster in clusters:
+        cluster_height = max(0.0, float(cluster["top"]) - float(cluster["bottom"]))
+        travel = content_height - cluster_height
+        position = 0.5 if travel <= 0.01 else max(
+            0.0, min(1.0, (content_top - float(cluster["top"])) / travel)
+        )
+        shift = top_shift + (bottom_shift - top_shift) * position
+        for item_index in cluster["indexes"]:
+            shifts[int(item_index)] = shift
+    for item_index in item_indexes:
+        shifts.setdefault(int(item_index), 0.0)
+    return shifts, True
 
 
 def _source_slots(artboard_count: int) -> list[dict[str, Any]]:
@@ -146,7 +225,10 @@ def build_plan(
     trim_top_pt = mm_to_pt(normalized_geometry["trimTop"])
     panel_width_pt = mm_to_pt(normalized_geometry["panelWidth"])
     panel_height_pt = mm_to_pt(normalized_geometry["panelHeight"])
+    content_top_inset_pt = mm_to_pt(normalized_geometry["contentTopInset"])
+    content_bottom_inset_pt = mm_to_pt(normalized_geometry["contentBottomInset"])
     side_gap_pt = 36.0
+    items_by_index = {int(item["index"]): item for item in inventory.get("items") or []}
     movements: list[dict[str, Any]] = []
     panels: list[dict[str, Any]] = []
     for item in normalized_assignments:
@@ -179,7 +261,20 @@ def build_plan(
         fitted_height = source_height * scale
         fit_left = target_left + (panel_width_pt - fitted_width) / 2.0
         fit_top = target_top - (panel_height_pt - fitted_height) / 2.0
-        for item_index in half.get("itemIndexes") or []:
+        item_indexes = [int(value) for value in half.get("itemIndexes") or []]
+        vertical_shifts, vertical_fill_expected = _vertical_distribution(
+            item_indexes,
+            items_by_index,
+            source_half_rect=source_half_rect,
+            fit_top=fit_top,
+            target_top=target_top,
+            panel_height=panel_height_pt,
+            scale=scale,
+            content_top_inset=content_top_inset_pt,
+            content_bottom_inset=content_bottom_inset_pt,
+        )
+        panel["verticalFillExpected"] = vertical_fill_expected
+        for item_index in item_indexes:
             movements.append({
                 "itemIndex": int(item_index),
                 "sourceArtboard": item["sourceArtboard"],
@@ -190,6 +285,8 @@ def build_plan(
                 "fitRect": [fit_left, fit_top, fit_left + fitted_width, fit_top - fitted_height],
                 "targetPanelRect": panel["targetRect"],
                 "scale": scale,
+                "verticalShiftPt": vertical_shifts[item_index],
+                "verticalFillExpected": vertical_fill_expected,
             })
     mapped = {item["itemIndex"] for item in movements}
     printable = {
@@ -258,7 +355,7 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
       item.resize(factor*100,factor*100,true,true,true,true,factor*100,Transformation.TOPLEFT);
       var scaled=item.geometricBounds;
       var targetLeft=Number(move.fitRect[0])+(oldLeft-Number(move.sourceRect[0]))*factor;
-      var targetTop=Number(move.fitRect[1])-(Number(move.sourceRect[1])-oldTop)*factor;
+      var targetTop=Number(move.fitRect[1])-(Number(move.sourceRect[1])-oldTop)*factor+Number(move.verticalShiftPt||0);
       item.translate(targetLeft-Number(scaled[0]),targetTop-Number(scaled[1]));
     }}
     for(var p=0;p<preserve.length;p++) {{ var idx=Number(preserve[p]); if(!top[idx]) throw new Error("Preserved item index changed: "+idx); if(seen[String(idx)]) throw new Error("Mapped item cannot also be preserved: "+idx); seen[String(idx)]=true; }}
@@ -278,10 +375,18 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
       if(size>0&&size<minFont) {{ try {{ attrs.size=minFont; raisedFonts++; }} catch(fontError) {{}} }}
       try {{ if(frame.kind===TextType.AREATEXT&&frame.overflows) overset.push(t); }} catch(overflowError) {{}}
     }}
-    var outOfPanel=[];
+    var outOfPanel=[], panelContent={{}};
     for(var checkIndex=0;checkIndex<moves.length;checkIndex++) {{
       var checkedMove=moves[checkIndex], checkedItem=top[Number(checkedMove.itemIndex)], visible=checkedItem.visibleBounds, panelRect=checkedMove.targetPanelRect, tolerance=0.75;
       if(Number(visible[0])<Number(panelRect[0])-tolerance||Number(visible[1])>Number(panelRect[1])+tolerance||Number(visible[2])>Number(panelRect[2])+tolerance||Number(visible[3])<Number(panelRect[3])-tolerance) outOfPanel.push(Number(checkedMove.itemIndex));
+      var panelKey=String(checkedMove.targetArtboard)+":"+String(checkedMove.targetPanel), metric=panelContent[panelKey];
+      if(!metric) metric=panelContent[panelKey]={{targetArtboard:Number(checkedMove.targetArtboard),targetPanel:Number(checkedMove.targetPanel),panelTop:Number(panelRect[1]),panelBottom:Number(panelRect[3]),contentTop:Number(visible[1]),contentBottom:Number(visible[3]),verticalFillExpected:Boolean(checkedMove.verticalFillExpected)}};
+      else {{ metric.contentTop=Math.max(metric.contentTop,Number(visible[1])); metric.contentBottom=Math.min(metric.contentBottom,Number(visible[3])); metric.verticalFillExpected=metric.verticalFillExpected||Boolean(checkedMove.verticalFillExpected); }}
+    }}
+    var metricParts=[];
+    for(var metricKey in panelContent) if(panelContent.hasOwnProperty(metricKey)) {{
+      var panelMetric=panelContent[metricKey], topBlank=Math.max(0,panelMetric.panelTop-panelMetric.contentTop), bottomBlank=Math.max(0,panelMetric.contentBottom-panelMetric.panelBottom);
+      metricParts.push('{{"targetArtboard":'+panelMetric.targetArtboard+',"targetPanel":'+panelMetric.targetPanel+',"topBlankPt":'+topBlank+',"bottomBlankPt":'+bottomBlank+',"verticalFillExpected":'+(panelMetric.verticalFillExpected?'true':'false')+'}}');
     }}
 
     var marks=doc.layers.add(); marks.name="FIVE_FOLD_PRINT_MARKS"; marks.printable=true;
@@ -303,7 +408,7 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
     try {{ pdfOptions.trimMarks=false; pdfOptions.registrationMarks=false; pdfOptions.colorBars=false; pdfOptions.pageInformation=false; }} catch(markError) {{}}
     doc.saveAs(outputPDF,pdfOptions);
     var outputTop=topItems(doc).length, editable=(doc.artboards.length===2&&outputTop===top.length+markCount&&doc.textFrames.length===sourceText&&doc.placedItems.length===sourcePlaced&&doc.rasterItems.length===sourceRaster&&doc.groupItems.length===sourceGroups&&doc.layers.length===sourceLayers+1);
-    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"FIVE_FOLD","artboardCount":'+doc.artboards.length+',"panelCountPerSide":5,"mediaWidthPt":'+mediaW+',"mediaHeightPt":'+mediaH+',"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPanelItemIndexes":['+outOfPanel.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"outputTopLevelItems":'+outputTop+',"printMarkCount":'+markCount+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
+    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"FIVE_FOLD","artboardCount":'+doc.artboards.length+',"panelCountPerSide":5,"mediaWidthPt":'+mediaW+',"mediaHeightPt":'+mediaH+',"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPanelItemIndexes":['+outOfPanel.join(',')+'],"panelContentMetrics":['+metricParts.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"outputTopLevelItems":'+outputTop+',"printMarkCount":'+markCount+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
   }} finally {{ doc.close(SaveOptions.DONOTSAVECHANGES); }}
 }}());
 '''
@@ -319,6 +424,20 @@ def validate_qa(qa: Mapping[str, Any], geometry: Mapping[str, Any]) -> list[dict
         issues.append(imposition.blocking_issue("text_overflow", f"五折页存在溢出文本框：{qa['oversetTextFrameIndexes']}", "请编辑内容或调整面板语义重排规则；不得继续缩小低于最小正文字号"))
     if qa.get("outOfPanelItemIndexes"):
         issues.append(imposition.blocking_issue("panel_bounds_violation", f"五折页对象超出所属成品面板：{qa['outOfPanelItemIndexes']}", "请调整面板映射或执行语义重排，避免内容跨越裁切线或折线"))
+    excessive_blank = [
+        f"{int(item.get('targetArtboard', -1))}:{int(item.get('targetPanel', -1))}"
+        for item in qa.get("panelContentMetrics") or []
+        if item.get("verticalFillExpected") and (
+            float(item.get("topBlankPt") or 0) > mm_to_pt(12)
+            or float(item.get("bottomBlankPt") or 0) > mm_to_pt(12)
+        )
+    ]
+    if excessive_blank:
+        issues.append(imposition.blocking_issue(
+            "excessive_vertical_whitespace",
+            f"五折页有效内容面板上下留白超过参考阈值：{excessive_blank}",
+            "请检查内容边界识别和纵向分布；不要退回按整块 A4 半页缩放",
+        ))
     expected_width = mm_to_pt(geometry["mediaWidth"])
     expected_height = mm_to_pt(geometry["mediaHeight"])
     if abs(float(qa.get("mediaWidthPt") or 0) - expected_width) > 0.1 or abs(float(qa.get("mediaHeightPt") or 0) - expected_height) > 0.1:

@@ -10,6 +10,7 @@ The five-fold output is an alternative to AB/A/B booklet imposition. Do not run 
 - Horizontal trim margins: `5 mm` on each side.
 - Vertical trim margins: `9.19 mm` on each side.
 - Finished panel size: `76 × 156.22 mm`.
+- Dense reference panels keep about `5.8 mm` above and `3.7 mm` below live content inside the finished panel.
 - Crop and fold marks are native Illustrator paths inside the media box.
 - PDF bleed is zero; `MediaBox == CropBox == BleedBox == TrimBox`.
 
@@ -42,7 +43,9 @@ The plan must define all ten target panels and every source half-page exactly on
 
 ## Native-object layout
 
-The first implementation scales and moves each source half-page's native top-level Illustrator objects into its assigned panel. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
+The implementation scales source objects uniformly to the panel width, then redistributes their vertical positions into the reference content insets. Object dimensions remain proportional: images and text are not stretched vertically. A half-page whose content occupies less than 40% of its source height is treated as intentionally sparse and remains centered instead of being artificially expanded. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
+
+QA records `panelContentMetrics` and blocks a dense panel when either top or bottom whitespace exceeds `12 mm`. This prevents regression to scaling the complete A4 half-page, including its original margins.
 
 This native-fit mode is a technical conversion baseline, not semantic editorial reflow. If the customer requires the dense MC-230 reference style, onboard panel-level semantic rules and edit content until all overset and readability gates pass.
 

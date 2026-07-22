@@ -44,6 +44,45 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertEqual(geometry["panelCount"], 5)
         self.assertAlmostEqual(geometry["panelWidth"], 76.0)
         self.assertAlmostEqual(geometry["panelHeight"], 156.22)
+        self.assertAlmostEqual(geometry["contentTopInset"], 5.8)
+        self.assertAlmostEqual(geometry["contentBottomInset"], 3.7)
+
+    def test_dense_half_page_spreads_positions_to_reference_vertical_insets(self):
+        payload = inventory(1)
+        half = payload["halves"][0]
+        half["itemIndexes"] = [0, 2]
+        payload["items"] = [
+            {"index": 0, "typename": "TextFrame", "bounds": [10, -20, 200, -50]},
+            {"index": 1, "typename": "GroupItem", "bounds": [500, -20, 700, -50]},
+            {"index": 2, "typename": "TextFrame", "bounds": [10, -500, 200, -560]},
+        ]
+        payload["halves"][1]["itemIndexes"] = [1]
+        plan = folded.build_plan(payload)
+        first = next(item for item in plan["movements"] if item["itemIndex"] == 0)
+        last = next(item for item in plan["movements"] if item["itemIndex"] == 2)
+        self.assertTrue(first["verticalFillExpected"])
+        self.assertGreater(first["verticalShiftPt"], 0)
+        self.assertLess(last["verticalShiftPt"], 0)
+
+    def test_overlapping_title_and_bar_move_as_one_visual_cluster(self):
+        shifts, eligible = folded._vertical_distribution(
+            [0, 1, 2],
+            {
+                0: {"bounds": [0, -20, 200, -60]},
+                1: {"bounds": [10, -30, 190, -55]},
+                2: {"bounds": [10, -500, 190, -550]},
+            },
+            source_half_rect=[0, 0, 420, -595],
+            fit_top=-40,
+            target_top=-26,
+            panel_height=folded.mm_to_pt(156.22),
+            scale=0.5,
+            content_top_inset=folded.mm_to_pt(5.8),
+            content_bottom_inset=folded.mm_to_pt(3.7),
+        )
+        self.assertTrue(eligible)
+        self.assertAlmostEqual(shifts[0], shifts[1])
+        self.assertNotEqual(shifts[0], shifts[2])
 
     def test_bundled_reference_plan_is_intentionally_blocked_until_print_direction_confirmation(self):
         plan_path = ROOT / "skills/illustrator-manual-translator/assets/folded-leaflet-plans/five-panel-reference.v1.json"
@@ -89,6 +128,20 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         }, folded.normalize_geometry())
         self.assertEqual({item["type"] for item in issues}, {"editability_lost", "text_overflow", "panel_bounds_violation"})
 
+    def test_qa_blocks_regression_to_large_vertical_whitespace(self):
+        issues = folded.validate_qa({
+            "artboardCount": 2,
+            "panelCountPerSide": 5,
+            "mediaWidthPt": folded.mm_to_pt(390),
+            "mediaHeightPt": folded.mm_to_pt(174.6),
+            "editableObjectsPreserved": True,
+            "panelContentMetrics": [{
+                "targetArtboard": 1, "targetPanel": 2, "verticalFillExpected": True,
+                "topBlankPt": folded.mm_to_pt(24), "bottomBlankPt": folded.mm_to_pt(4),
+            }],
+        }, folded.normalize_geometry())
+        self.assertEqual([item["type"] for item in issues], ["excessive_vertical_whitespace"])
+
     def test_jsx_uses_native_objects_and_creates_print_marks(self):
         plan = folded.build_plan(inventory())
         with tempfile.TemporaryDirectory() as temp:
@@ -96,6 +149,8 @@ class FoldedLeafletPlanTests(unittest.TestCase):
             jsx = folded.build_layout_jsx(root / "source.ai", root / "out.ai", root / "out.pdf", root / "qa.json", plan)
         self.assertIn("item.resize", jsx)
         self.assertIn("item.translate", jsx)
+        self.assertIn("verticalShiftPt", jsx)
+        self.assertIn("panelContentMetrics", jsx)
         self.assertIn("FIVE_FOLD_PRINT_MARKS", jsx)
         self.assertIn("pdfOptions.preserveEditability=true", jsx)
         self.assertNotIn("placedItems.add", jsx)

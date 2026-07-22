@@ -8,7 +8,9 @@
     "trimTop": 9.19,
     "trimBottom": 9.19,
     "panelCount": 5,
-    "minimumBodyFontPt": 5.0
+    "minimumBodyFontPt": 5.0,
+    "contentTopInset": 5.8,
+    "contentBottomInset": 3.7
   },
   "printProfile": {
     "duplexFlip": "unconfirmed"
