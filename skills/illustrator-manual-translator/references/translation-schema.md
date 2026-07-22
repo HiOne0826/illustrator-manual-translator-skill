@@ -9,14 +9,15 @@ Input: `work/content-optimization-input.json`.
 Output row fields:
 
 - `fieldId`: exact ID from `templateFields`; required and unique.
-- `fieldName`: customer-facing Chinese label. If the input field has `fieldNameHint`, use it exactly; legal-name rows should clearly say that the registered name is preserved by default.
-- `sourceEvidence`: concise, traceable specification evidence.
+- `fieldName`: customer-facing Chinese label describing the actual template field; do not replace ordinary labels with special legal-name review wording.
+- `sourceEvidence`: concise, traceable evidence. For a template default, it must quote the exact `templateText`.
 - `aiChinese`: Chinese content to place in the template.
 - `optimizationNote`: required for every non-empty `aiChinese`; briefly states how technical evidence was made user-readable.
+- `contentOrigin`: `product-evidence` when the specification supplies the content; `template-default` when the specification does not supply it and the template default is retained.
 - `required`: whether empty content is forbidden.
 - `protectedTokens`: exact text that must survive correction and translation, including registered legal entity names. Translate surrounding role labels such as `Manufacturer` or `Producer`, not the protected legal name itself.
 
-Every template field must appear exactly once. `contentSource=product-evidence` uses only `canonicalProduct`; `contentSource=template-copy` must quote the exact `templateText` in `sourceEvidence` before localizing it. Required fields may not be empty. There is no review or action field.
+Every template field must appear exactly once and must explicitly set `contentOrigin`. Prefer matching `canonicalProduct` evidence. If the specification does not provide the field, use and localize `templateText`, set `contentOrigin=template-default`, and quote the exact default in `sourceEvidence`. This fallback is normal confirmed content, not an omission, and applies to optional fields and product-specific template copy without exception. A field with non-empty `templateText` may not have empty `aiChinese`. There is no review or action field.
 
 ## Translation Generation
 

@@ -4,13 +4,13 @@
   "visualSlots": [
     {"id": "brand.logo.cover", "name": "封面 Logo（留空保留模板默认）", "role": "brand-logo", "objectRefs": [{"type": "groupItem", "value": 17}], "bounds": [475.601967300392, -55.337517718408, 542.425113946247, -121.245857550901], "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 300},
     {"id": "brand.logo.footer", "name": "联系方式区 Logo 图形（留空保留模板默认）", "role": "brand-logo", "objectRefs": [{"type": "compoundPathItem", "value": 1}], "bounds": [66.208297729491, -510.637832641598, 102.935302734381, -546.860828399655], "replacementMode": "replace_group_with_vector", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 300},
-    {"id": "product.hero", "name": "封面产品主图", "role": "product-hero", "objectRefs": [{"type": "groupItem", "value": 4}], "bounds": [505.027619361877, -192.578531266265, 757.147614479065, -536.138528824858], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200},
-    {"id": "cover.gallery.1", "name": "封面产品图左上", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 16}], "bounds": [88.171057222996, -147.610775428333, 150.499970534034, -222.156121200565], "labelTextFrame": {"index": 61, "sourceText": "FT-889", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -234.7109375, 133.501953125, -243.310546875]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
-    {"id": "cover.gallery.2", "name": "封面产品图右上", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 13}], "bounds": [276.34538802306, -149.103470801014, 326.873347999443, -220.663425827885], "labelTextFrame": {"index": 59, "sourceText": "FT-838", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [289.416015625, -234.71142578125, 315.775390625, -243.31103515625]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
-    {"id": "cover.gallery.3", "name": "封面产品图左下", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 15}], "bounds": [90.5971443734, -257.466001169877, 148.073883383629, -338.300022428102], "labelTextFrame": {"index": 60, "sourceText": "FT-802", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -349.0146484375, 133.501953125, -357.6142578125]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
-    {"id": "cover.gallery.4", "name": "封面产品图右下", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 14}], "bounds": [261.104206249, -256.529908401895, 342.114529773504, -339.236115196081], "labelTextFrame": {"index": 62, "sourceText": "FT-833E", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [286.9482421875, -350.236328125, 318.6435546875, -358.8359375]}, "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 180},
-    {"id": "diagram.product-structure", "name": "产品结构图", "role": "product-structure-diagram", "objectRefs": [{"type": "groupItem", "value": 3}], "bounds": [56.880859375, -707.858068771004, 364.0634765625, -1065.181640625], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200},
-    {"id": "diagram.assembly", "name": "安装图", "role": "assembly-diagram", "objectRefs": [{"type": "groupItem", "value": 1}], "bounds": [974.107478882927, -750.607496136077, 1125.15752065286, -996.698034591316], "replacementMode": "replace_group_with_raster", "defaultFit": "contain", "required": false, "minDpi": 200}
+    {"id": "product.hero", "name": "封面产品主图（留空保留模板默认）", "role": "product-hero", "objectRefs": [{"type": "groupItem", "value": 4}], "bounds": [505.027619361877, -192.578531266265, 757.147614479065, -536.138528824858], "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 200},
+    {"id": "cover.gallery.1", "name": "封面产品图左上（留空保留模板默认）", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 16}], "bounds": [88.171057222996, -147.610775428333, 150.499970534034, -222.156121200565], "labelTextFrame": {"index": 61, "sourceText": "FT-889", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -234.7109375, 133.501953125, -243.310546875]}, "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.2", "name": "封面产品图右上（留空保留模板默认）", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 13}], "bounds": [276.34538802306, -149.103470801014, 326.873347999443, -220.663425827885], "labelTextFrame": {"index": 59, "sourceText": "FT-838", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [289.416015625, -234.71142578125, 315.775390625, -243.31103515625]}, "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.3", "name": "封面产品图左下（留空保留模板默认）", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 15}], "bounds": [90.5971443734, -257.466001169877, 148.073883383629, -338.300022428102], "labelTextFrame": {"index": 60, "sourceText": "FT-802", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [107.142578125, -349.0146484375, 133.501953125, -357.6142578125]}, "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "cover.gallery.4", "name": "封面产品图右下（留空保留模板默认）", "role": "product-gallery", "objectRefs": [{"type": "groupItem", "value": 14}], "bounds": [261.104206249, -256.529908401895, 342.114529773504, -339.236115196081], "labelTextFrame": {"index": 62, "sourceText": "FT-833E", "targetFieldId": "textframe_58", "fontName": "ArialRoundedMTBold", "fontSize": 8, "bounds": [286.9482421875, -350.236328125, 318.6435546875, -358.8359375]}, "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 180},
+    {"id": "diagram.product-structure", "name": "产品结构图（留空保留模板默认）", "role": "product-structure-diagram", "objectRefs": [{"type": "groupItem", "value": 3}], "bounds": [56.880859375, -707.858068771004, 364.0634765625, -1065.181640625], "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 200},
+    {"id": "diagram.assembly", "name": "安装图（留空保留模板默认）", "role": "assembly-diagram", "objectRefs": [{"type": "groupItem", "value": 1}], "bounds": [974.107478882927, -750.607496136077, 1125.15752065286, -996.698034591316], "replacementMode": "replace_group_with_raster", "emptyBehavior": "keep_template", "defaultFit": "contain", "required": false, "minDpi": 200}
   ],
   "typographyPolicy": {
     "bodyFontSize": "fixed-template-standard",
@@ -50,6 +50,17 @@
   "printPolicy": {
     "requireEvenArtboardCount": true,
     "oddPageStrategy": "append-blank-artboard"
+  },
+  "impositionPolicy": {
+    "cover": {
+      "artboardIndex": 0,
+      "left": "back_cover",
+      "right": "front_cover"
+    },
+    "midlineTolerancePt": 0.5,
+    "edgeTolerancePt": 0.75,
+    "blankPlacement": "after-last-physical-body-before-back-cover",
+    "blankContent": "empty"
   },
   "pages": [
     {
@@ -386,6 +397,8 @@
             "balance": "count",
             "itemMaxLines": 2,
             "columnWidthPt": 260,
+            "rightColumnLeftPt": 235,
+            "minColumnGapPt": 8,
             "minFontSizePt": 8.5,
             "bottomBound": -1150.9947,
             "maxUpwardShiftPt": 18,
@@ -536,8 +549,8 @@
             "titleFontName": "ArialMT",
             "titleMaxLines": 1,
             "titleMinFontSizePt": 30,
-            "titleVerticalAlign": "match-reference-bottom",
-            "titleVerticalReferenceRole": "maintenance-flow-section",
+            "titleVerticalAlign": "bottom",
+            "titleBottomInsetPt": 0,
             "bodyMinFontSizePt": 8.5,
             "providerCountVariable": true,
             "allowCardSplitAcrossPages": true,

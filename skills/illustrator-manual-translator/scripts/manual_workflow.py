@@ -24,6 +24,11 @@ from xml.etree import ElementTree as ET
 
 SCHEMA = "illustrator-manual-project/1.0"
 WORKBOOK_NAME = "说明书内容确认.xlsx"
+IMPOSITION_QA_CONTRACT_VERSION = 2
+REVIEW_META_PATTERN = re.compile(
+    r"(?:请(?:客户)?确认|待确认|需要确认|需确认|please\s+confirm|needs?\s+confirmation|\bTODO\b|\bTBD\b)",
+    re.IGNORECASE,
+)
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REVIEW_SCRIPT = Path(__file__).with_name("review_workbook.mjs")
@@ -166,6 +171,21 @@ def repo_imports() -> tuple[Any, Any]:
     except ImportError as exc:
         raise WorkflowError(f"缺少规格书抽取或 Illustrator 运行模块：{exc}") from exc
     return extract_sources, illustrator_worker
+
+
+def imposition_import() -> Any:
+    local_module = Path(__file__).with_name("illustrator_imposition.py")
+    if not local_module.is_file():
+        raise WorkflowError("缺少独立 Illustrator 拼版模块 illustrator_imposition.py")
+    script_root = str(local_module.parent)
+    if script_root not in sys.path:
+        sys.path.insert(0, script_root)
+    spec = importlib.util.spec_from_file_location("manual_skill_illustrator_imposition", local_module)
+    if not spec or not spec.loader:
+        raise WorkflowError("无法加载 Illustrator 拼版模块")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def artifact_runtime(project: Path) -> tuple[str, Path, Path]:
@@ -315,15 +335,6 @@ def require_asset_confirmation(project: Path, state: dict[str, Any]) -> None:
         raise WorkflowError(f"图片确认槽位不完整；缺少：{missing}；多出：{extra}")
 
 
-def customer_field_name_hint(template_text: str) -> str:
-    normalized = " ".join(str(template_text or "").split()).lower()
-    if normalized.startswith("manufacturer:"):
-        return "制造商法定名称（默认保留原文）"
-    if normalized.startswith("producer:"):
-        return "生产商法定名称（默认保留原文）"
-    return ""
-
-
 def asset_marker_bindings(assets: dict[str, dict[str, Any]], slots: dict[str, dict[str, Any]]) -> tuple[dict[str, str], set[str]]:
     bindings: dict[str, str] = {}
     bound_assets: set[str] = set()
@@ -387,10 +398,8 @@ def candidate_fields(metadata: dict[str, Any], layout_rules: dict[str, Any]) -> 
             "required": any(token in str(binding["role"]).lower() for token in ("safety", "operation", "specification", "product-title", "fixed-brand")),
             "allowTemplateDefault": bool(binding.get("allowTemplateDefault", False)),
             "contentSource": str(binding.get("contentSource") or "product-evidence"),
+            "fallbackPolicy": "template-default-when-spec-missing",
         }
-        field_name_hint = customer_field_name_hint(row["templateText"])
-        if field_name_hint:
-            row["fieldNameHint"] = field_name_hint
         rows.append(row)
     for slot in layout_rules.get("virtualTextSlots", []):
         rows.append({
@@ -406,6 +415,7 @@ def candidate_fields(metadata: dict[str, Any], layout_rules: dict[str, Any]) -> 
             "required": False,
             "allowTemplateDefault": bool(slot.get("allowTemplateDefault", False)),
             "contentSource": "template-copy",
+            "fallbackPolicy": "template-default-when-spec-missing",
         })
     return sorted(rows, key=lambda item: (item["objectType"] == "layoutText", int(item["objectIndex"])))
 
@@ -510,9 +520,10 @@ def command_init(args: argparse.Namespace) -> None:
     fields = candidate_fields(metadata, layout_rules)
     content_input = {
         "task": "optimize-technical-specification-for-user-manual",
-        "instructions": "先忠实提取技术事实，再将其改写为普通用户可理解、可直接用于产品说明书的中文。按使用场景、操作步骤、安全提示和维护建议组织表达；解释必要术语，避免只罗列参数。不得发明功能、效果、认证或安全结论。型号、数字、单位、品牌、网址和企业法定名称必须原样保留；企业角色标签可以本地化，企业法定名称本体默认不翻译。contentSource=template-copy 的标题、固定品牌文案和栏目名称必须在 sourceEvidence 中逐字引用 templateText，再进行翻译或本地化，不得因规格书未出现而留空。若 templateFields 提供 fieldNameHint，fieldName 必须逐字使用该提示，方便客户在 Excel 中识别字段。每个非空 aiChinese 都必须同时给出可追溯 sourceEvidence 和 optimizationNote。",
+        "instructions": "先忠实提取技术事实，再将其改写为普通用户可理解、可直接用于产品说明书的中文。按使用场景、操作步骤、安全提示和维护建议组织表达；解释必要术语，避免只罗列参数。不得发明功能、效果、认证或安全结论。每个模板字段都先查 canonicalProduct：规格书提供对应内容时使用规格书；规格书未提供时必须以 templateText 作为默认内容，翻译或本地化后写入确认书，不得留空，也不得把这种情况标成内容遗漏。使用模板默认内容时将 contentOrigin 设为 template-default，并在 sourceEvidence 中逐字引用 templateText。型号、数字、单位、品牌、网址和企业法定名称必须原样保留；企业角色标签可以本地化，企业法定名称本体默认不翻译。每个非空 aiChinese 都必须同时给出可追溯 sourceEvidence 和 optimizationNote。",
         "optimizationPrinciples": [
-            "事实不变：只使用 canonicalProduct 或 template-copy 字段的 templateText",
+            "来源优先级：先使用 canonicalProduct；缺失时使用当前字段的 templateText 默认内容",
+            "默认不等于遗漏：规格书未提供的字段仍保留并本地化模板默认内容",
             "用户可读：把技术术语改写成短句、步骤或明确用途",
             "面向任务：优先回答是什么、怎么用、注意什么、如何维护",
             "禁止夸大：不新增性能承诺、比较结论、认证或医疗效果",
@@ -523,6 +534,13 @@ def command_init(args: argparse.Namespace) -> None:
     }
     content_input_path = project / "work" / "content-optimization-input.json"
     write_json(content_input_path, content_input)
+    high_conflicts = [item for item in canonical.get("conflicts") or [] if str(item.get("severity") or "").casefold() == "high"]
+    conflict_review_path = project / "work" / "conflict-review-input.json"
+    write_json(conflict_review_path, {
+        "instructions": "逐项核对高严重度冲突。只有得到明确事实结论后，才能把 status 设为 resolved；resolution 必须写明最终采用的事实或修正。",
+        "conflicts": high_conflicts,
+        "resolutionSchema": {"conflictId": "conflict-001", "status": "resolved", "resolution": "最终采用的事实或修正"},
+    })
     languages = [item.strip() for item in args.languages.split(",") if item.strip()]
     if not languages:
         raise WorkflowError("至少需要一个目标语种")
@@ -546,11 +564,19 @@ def command_init(args: argparse.Namespace) -> None:
         "visualAssets": visual_assets(canonical, project),
         "visualSlots": mandatory_visual_slots,
         "canonicalProductPath": relative(project, canonical_path),
+        "canonicalProductSha256": sha256(canonical_path),
+        "conflictReviewInputPath": relative(project, conflict_review_path),
+        "highConflictIds": [str(item["id"]) for item in high_conflicts],
         "contentOptimizationInputPath": relative(project, content_input_path),
         "workbookPath": f"review/{WORKBOOK_NAME}",
     }
     save_state(project, state)
-    print(json.dumps({"project": str(project), "stage": state["stage"], "next": "让 Skill 根据 content-optimization-input.json 完成用户化改写，然后运行 optimize-chinese", "contentOptimizationInput": str(content_input_path)}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "project": str(project), "stage": state["stage"],
+        "next": "先处理 conflict-review-input.json 中的高严重度冲突，再完成中文优化" if high_conflicts else "让 Skill 根据 content-optimization-input.json 完成用户化改写，然后运行 optimize-chinese",
+        "contentOptimizationInput": str(content_input_path),
+        "highConflictCount": len(high_conflicts), "conflictReviewInput": str(conflict_review_path),
+    }, ensure_ascii=False, indent=2))
 
 
 def validate_content_rows(state: dict[str, Any], rows: list[dict[str, Any]], *, require_optimization: bool = False) -> list[dict[str, Any]]:
@@ -566,33 +592,98 @@ def validate_content_rows(state: dict[str, Any], rows: list[dict[str, Any]], *, 
         ai_chinese = str(row.get("aiChinese") or "")
         source_evidence = str(row.get("sourceEvidence") or "").strip()
         optimization_note = str(row.get("optimizationNote") or "").strip()
+        content_origin = str(row.get("contentOrigin") or "").strip()
+        template_text = str(item.get("templateText") or "").strip()
+        missing_spec_evidence = any(marker in source_evidence.casefold() for marker in (
+            "规格书未提供", "规格书中未提供", "specification does not provide", "not provided by specification",
+        ))
+        if require_optimization and missing_spec_evidence and content_origin != "template-default":
+            raise WorkflowError(f"规格书未提供该字段时，内容来源必须明确为 template-default：{field_id}")
+        if require_optimization and content_origin and content_origin not in {"product-evidence", "template-default"}:
+            raise WorkflowError(f"AI 内容来源无效：{field_id}={content_origin}")
+        if require_optimization and template_text and not ai_chinese.strip():
+            raise WorkflowError(f"模板字段存在默认内容；规格书未提供时必须沿用该默认内容，AI 中文不得为空：{field_id}")
         if require_optimization and bool(item.get("required")) and not ai_chinese.strip():
             raise WorkflowError(f"AI 内容优化后的必填字段为空：{field_id}")
         if require_optimization and ai_chinese.strip() and not optimization_note:
             raise WorkflowError(f"AI 内容优化字段缺少 optimizationNote：{field_id}")
         if require_optimization and ai_chinese.strip() and not source_evidence:
             raise WorkflowError(f"AI 内容优化字段缺少 sourceEvidence：{field_id}")
-        if require_optimization and ai_chinese.strip() and item.get("contentSource") == "template-copy":
-            template_text = str(item.get("templateText") or "").strip()
-            if template_text and template_text not in source_evidence:
-                raise WorkflowError(f"模板固定文案字段必须在 sourceEvidence 中引用 templateText：{field_id}")
+        if require_optimization and item.get("contentSource") == "template-copy" and not content_origin:
+            content_origin = "template-default"
+        if require_optimization and content_origin == "template-default" and template_text not in source_evidence:
+            raise WorkflowError(f"模板默认内容必须在 sourceEvidence 中逐字引用 templateText：{field_id}")
         result.append({
             **item,
-            "fieldName": str(item.get("fieldNameHint") or row.get("fieldName") or item.get("regionId") or field_id),
+            "fieldName": str(row.get("fieldName") or item.get("regionId") or field_id),
             "sourceEvidence": source_evidence,
             "aiChinese": ai_chinese,
+            "finalChinese": ai_chinese,
             "optimizationNote": optimization_note,
+            "contentOrigin": content_origin or "product-evidence",
             "required": bool(item.get("required", False) or row.get("required", False)),
             "protectedTokens": list(dict.fromkeys([
                 *[str(token) for token in row.get("protectedTokens") or [] if str(token).strip()],
                 *automatic_protected_tokens(str(row.get("aiChinese") or "")),
-                *automatic_protected_tokens(str(row.get("sourceEvidence") or "")),
             ])),
         })
     missing = sorted(set(expected) - seen)
     if missing:
         raise WorkflowError(f"中文内容缺少模板字段：{', '.join(missing[:10])}")
     return result
+
+
+def invalidate_downstream_state(state: dict[str, Any]) -> None:
+    for key in (
+        "chineseConfirmedAt", "confirmedChinesePath",
+        "translations", "translationConfirmedAt", "confirmedTranslationsPath", "translationInputPath",
+        "assetSelections", "assetConfirmedAt", "confirmedAssetsPath",
+        "sourceChineseRenderResultsPath", "sourceChineseLayoutConfirmedAt", "sourceChineseManifestPath",
+        "renderResultsPath", "blockingIssues", "blockingPhase",
+        "electronicConfirmedAt", "electronicManifestPath",
+        "abImpositionResultsPath", "abConfirmedAt", "confirmedAbManifestPath",
+        "splitResultsPath", "aBConfirmedAt", "confirmedABSplitManifestPath", "impositionManifestPath",
+        "deliveryPackageGenerated", "deliveredAt", "deliveryManifestPath",
+    ):
+        state.pop(key, None)
+
+
+def command_refresh_chinese(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(
+        state,
+        "waiting_chinese_confirmation", "needs_asset_review", "waiting_asset_confirmation",
+        "ready_to_render_chinese", "waiting_chinese_layout_confirmation", "blocked_chinese",
+        "needs_translation_generation", "waiting_translation_confirmation",
+        "ready_to_render", "waiting_layout_confirmation", "blocked",
+        "ready_to_impose_ab", "blocked_ab_imposition", "waiting_ab_confirmation",
+        "ready_to_split_ab", "blocked_a_b_split", "waiting_a_b_confirmation", "completed_without_delivery", "delivered",
+    )
+    ensure_input_hashes(project, state)
+    payload = read_json(project_path(args.content_json))
+    rows = validate_content_rows(state, payload.get("rows", payload), require_optimization=True)
+    optimized = project / "work" / "optimized-chinese.json"
+    write_json(optimized, {"optimizedAt": now(), "rows": rows})
+    review_input = project / "work" / "chinese-review-input.json"
+    write_json(review_input, {"rows": rows})
+    workbook = project / state["workbookPath"]
+    backup = workbook.with_name(f"{workbook.stem}.刷新前备份-{datetime.now().strftime('%Y%m%d-%H%M%S')}{workbook.suffix}")
+    if workbook.is_file():
+        shutil.copy2(workbook, backup)
+    run_workbook(project, "create-chinese", "--input", str(review_input), "--output", str(workbook))
+    state["fields"] = rows
+    state["optimizedChinesePath"] = relative(project, optimized)
+    state["optimizedChineseSha256"] = sha256(optimized)
+    invalidate_downstream_state(state)
+    state["stage"] = "waiting_chinese_confirmation"
+    state["workbookGeneratedHash"] = sha256(workbook)
+    save_state(project, state)
+    print(json.dumps({
+        "stage": state["stage"], "workbook": str(workbook),
+        "backup": str(backup) if backup.is_file() else "",
+        "message": "中文内容已刷新，旧中文、图片、版式及翻译确认已失效；请重新核对黄色‘最终中文’列并明确确认",
+    }, ensure_ascii=False, indent=2))
 
 
 def command_optimize_chinese(args: argparse.Namespace) -> None:
@@ -651,9 +742,14 @@ def assert_exact_ids(actual: Iterable[str], expected: Iterable[str], label: str)
         raise WorkflowError(f"{label}字段集合变化；缺少={missing[:5]}，未知={unknown[:5]}")
 
 
+def normalize_workbook_text(value: Any) -> str:
+    """Treat Excel's equivalent CR/LF cell line endings as identical."""
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def assert_readonly(actual: dict[str, Any], expected: dict[str, Any], keys: Iterable[str], excel_row: int) -> None:
     for key in keys:
-        if str(actual.get(key) or "") != str(expected.get(key) or ""):
+        if normalize_workbook_text(actual.get(key)) != normalize_workbook_text(expected.get(key)):
             raise WorkflowError(f"Excel 第 {excel_row} 行误改了只读列：{key}")
 
 
@@ -663,11 +759,17 @@ def assert_protected_tokens(text: str, tokens: Iterable[str], excel_row: int) ->
         raise WorkflowError(f"Excel 第 {excel_row} 行缺少受保护内容：{', '.join(missing[:8])}")
 
 
+def assert_publishable_text(text: str, excel_row: int) -> None:
+    if REVIEW_META_PATTERN.search(text):
+        raise WorkflowError(f"Excel 第 {excel_row} 行仍包含待确认/TODO 等审核提示，不能进入正式说明书")
+
+
 def command_confirm_chinese(args: argparse.Namespace) -> None:
     project = project_path(args.project)
     state = load_state(project)
     require_stage(state, "waiting_chinese_confirmation")
     ensure_input_hashes(project, state)
+    require_resolved_conflicts(project, state)
     workbook = project / state["workbookPath"]
     rows = workbook_rows(project, workbook, "read-chinese")
     expected = {item["fieldId"]: item for item in state["fields"]}
@@ -679,6 +781,7 @@ def command_confirm_chinese(args: argparse.Namespace) -> None:
         final_text = str(row.get("finalChinese") or "").strip()
         if item.get("required") and not final_text:
             raise WorkflowError(f"Excel 第 {row['excelRow']} 行必填中文为空")
+        assert_publishable_text(final_text, int(row["excelRow"]))
         confirmed.append({
             **item,
             "finalChinese": final_text,
@@ -705,6 +808,73 @@ def command_confirm_chinese(args: argparse.Namespace) -> None:
     print(json.dumps({"stage": state["stage"], "next": "先完成图片确认，再生成并确认中文版 AI/PDF"}, ensure_ascii=False, indent=2))
 
 
+def command_resolve_conflicts(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "needs_chinese_optimization", "ready_to_export_chinese", "waiting_chinese_confirmation")
+    ensure_input_hashes(project, state)
+    payload = read_json(project_path(args.resolutions_json))
+    expected, canonical_hash = expected_high_conflicts(project, state)
+    rows = payload.get("resolutions", payload) if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise WorkflowError("冲突处理文件必须是 resolutions 数组或数组本身")
+    actual = [str(item.get("conflictId") or "") for item in rows if isinstance(item, dict)]
+    assert_exact_ids(actual, expected, "高严重度冲突处理")
+    normalized = []
+    for item in rows:
+        conflict_id = str(item.get("conflictId") or "")
+        if str(item.get("status") or "").casefold() != "resolved":
+            raise WorkflowError(f"高严重度冲突 {conflict_id} 尚未标记为 resolved")
+        resolution = str(item.get("resolution") or "").strip()
+        if not resolution or REVIEW_META_PATTERN.search(resolution):
+            raise WorkflowError(f"高严重度冲突 {conflict_id} 缺少明确、可执行的最终结论")
+        normalized.append({"conflictId": conflict_id, "status": "resolved", "resolution": resolution})
+    output = project / "work" / "resolved-conflicts.json"
+    write_json(output, {
+        "resolvedAt": now(),
+        "canonicalProductSha256": canonical_hash,
+        "resolutions": normalized,
+    })
+    state["resolvedConflictsPath"] = relative(project, output)
+    state["resolvedConflictsSha256"] = sha256(output)
+    state["conflictsResolvedAt"] = now()
+    save_state(project, state)
+    print(json.dumps({"stage": state["stage"], "resolved": expected, "next": "继续当前中文内容流程"}, ensure_ascii=False, indent=2))
+
+
+def require_resolved_conflicts(project: Path, state: dict[str, Any]) -> None:
+    expected, canonical_hash = expected_high_conflicts(project, state)
+    if not expected:
+        return
+    path_value = str(state.get("resolvedConflictsPath") or "")
+    path = project / path_value if path_value else None
+    if path is None or not path.is_file() or sha256(path) != str(state.get("resolvedConflictsSha256") or ""):
+        raise WorkflowError(f"仍有未解决的高严重度规格冲突：{', '.join(expected)}；请先运行 resolve-conflicts")
+    payload = read_json(path)
+    if payload.get("canonicalProductSha256") != canonical_hash:
+        raise WorkflowError("规格抽取结果已变化，旧冲突处理结论失效")
+    rows = payload.get("resolutions") or []
+    actual = [str(item.get("conflictId") or "") for item in rows]
+    assert_exact_ids(actual, expected, "已解决冲突")
+    if any(str(item.get("status") or "").casefold() != "resolved" or not str(item.get("resolution") or "").strip() for item in rows):
+        raise WorkflowError("高严重度规格冲突处理结论不完整")
+
+
+def expected_high_conflicts(project: Path, state: dict[str, Any]) -> tuple[list[str], str]:
+    path_value = str(state.get("canonicalProductPath") or "")
+    path = project / path_value if path_value else None
+    if path is None or not path.is_file():
+        expected = list(dict.fromkeys(str(value) for value in state.get("highConflictIds") or []))
+        return expected, str(state.get("canonicalProductSha256") or "")
+    canonical_hash = sha256(path)
+    expected = [
+        str(item.get("id") or "")
+        for item in read_json(path).get("conflicts") or []
+        if str(item.get("severity") or "").casefold() == "high" and str(item.get("id") or "")
+    ]
+    return list(dict.fromkeys(expected)), canonical_hash
+
+
 def create_translation_input(project: Path, state: dict[str, Any]) -> Path:
     translation_input = project / "work" / "translation-generation-input.json"
     write_json(translation_input, {
@@ -712,7 +882,11 @@ def create_translation_input(project: Path, state: dict[str, Any]) -> Path:
         "languages": state["languages"],
         "rows": [{
             "fieldId": item["fieldId"], "fieldName": item["fieldName"],
-            "finalChinese": item["finalChinese"], "protectedTokens": item.get("protectedTokens") or [],
+            "finalChinese": item["finalChinese"],
+            "protectedTokens": list(dict.fromkeys([
+                *[str(token) for token in item.get("protectedTokens") or [] if str(token) and str(token) in item["finalChinese"]],
+                *automatic_protected_tokens(item["finalChinese"]),
+            ])),
         } for item in state["fields"]],
     })
     state["translationInputPath"] = relative(project, translation_input)
@@ -852,9 +1026,13 @@ def command_confirm_translations(args: argparse.Namespace) -> None:
         final_text = str(row.get("finalTranslation") or "").strip()
         if item["confirmedChinese"] and not final_text:
             raise WorkflowError(f"Excel 第 {row['excelRow']} 行最终译文为空")
+        assert_publishable_text(final_text, int(row["excelRow"]))
         if final_text:
             field = next(candidate for candidate in state["fields"] if candidate["fieldId"] == item["fieldId"])
-            tokens = list(dict.fromkeys([*(field.get("protectedTokens") or []), *automatic_protected_tokens(item["confirmedChinese"])]))
+            tokens = list(dict.fromkeys([
+                *[str(token) for token in field.get("protectedTokens") or [] if str(token) and str(token) in item["confirmedChinese"]],
+                *automatic_protected_tokens(item["confirmedChinese"]),
+            ]))
             assert_protected_tokens(final_text, tokens, int(row["excelRow"]))
         confirmed.append({**item, "finalTranslation": final_text, "excelRow": int(row["excelRow"])})
     output = project / "work" / "confirmed-translations.json"
@@ -1105,6 +1283,10 @@ def render_visual_label_items(
     occupied_indexes: set[int],
 ) -> list[dict[str, Any]]:
     items = []
+    selected_asset_by_slot = {
+        str(item.get("slotId") or ""): str(item.get("finalAssetId") or "")
+        for item in state.get("assetSelections") or []
+    }
     for slot in state.get("visualSlots") or []:
         label = slot.get("labelTextFrame")
         if not label:
@@ -1115,7 +1297,10 @@ def render_visual_label_items(
         target_field_id = str(label["targetFieldId"])
         if target_field_id not in target_by_field_id:
             raise WorkflowError(f"视觉槽位 {slot['id']} 的型号标签引用了未知字段：{target_field_id}")
-        target = target_by_field_id[target_field_id]
+        selected_asset = selected_asset_by_slot.get(str(slot["id"]), "")
+        if not selected_asset and slot.get("emptyBehavior") == "keep_template":
+            continue
+        target = target_by_field_id[target_field_id] if selected_asset else ""
         items.append({
             "index": index,
             "objectType": "text",
@@ -1336,13 +1521,280 @@ def command_confirm_layout(args: argparse.Namespace) -> None:
     ensure_input_hashes(project, state)
     render_results = read_json(project / state["renderResultsPath"])["results"]
     require_source_chinese_confirmation(project, state)
-    delivered = list(read_json(project / state["sourceChineseManifestPath"]).get("files") or [])
-    delivered.extend(copy_confirmed_results(project, render_results))
+    electronic = list(read_json(project / state["sourceChineseManifestPath"]).get("files") or [])
+    electronic.extend(copy_confirmed_results(project, render_results))
+    manifest = project / "work" / "electronic-manifest.json"
+    write_json(manifest, {"projectSchema": SCHEMA, "confirmedAt": now(), "files": electronic})
+    state["stage"] = "ready_to_impose_ab"
+    state["electronicConfirmedAt"] = now()
+    state["electronicManifestPath"] = relative(project, manifest)
+    save_state(project, state)
+    print(json.dumps({
+        "stage": state["stage"], "electronicManifest": str(manifest),
+        "next": "运行 impose-ab 为中文版和每个目标语种生成 AB 版",
+    }, ensure_ascii=False, indent=2))
+
+
+def expected_languages(state: dict[str, Any]) -> list[str]:
+    return list(dict.fromkeys(["zh-CN", *[str(value) for value in state.get("languages") or []]]))
+
+
+def electronic_sources(project: Path, state: dict[str, Any]) -> dict[str, dict[str, Path]]:
+    manifest = read_json(project / state["electronicManifestPath"])
+    grouped: dict[str, dict[str, Path]] = {}
+    for item in manifest.get("files") or []:
+        language = str(item.get("language") or "")
+        kind = str(item.get("type") or "")
+        if kind not in ("ai", "pdf"):
+            continue
+        path = (project / str(item.get("path") or "")).resolve()
+        if not path.is_file() or sha256(path) != item.get("sha256"):
+            raise WorkflowError(f"{language} 电子版 {kind.upper()} 在确认后发生变化")
+        grouped.setdefault(language, {})[kind] = path
+    expected = expected_languages(state)
+    missing = [language for language in expected if set(grouped.get(language) or {}) != {"ai", "pdf"}]
+    extras = sorted(set(grouped) - set(expected))
+    if missing or extras:
+        raise WorkflowError(f"电子版语种集不完整；缺失={missing}，多余={extras}")
+    return grouped
+
+
+def current_imposition_runtime_sha256() -> str:
+    return sha256(SKILL_ROOT / "scripts" / "illustrator_imposition.py")
+
+
+def validate_imposition_result_contract(result: dict[str, Any], variant: str) -> None:
+    if int(result.get("qaContractVersion") or 0) != IMPOSITION_QA_CONTRACT_VERSION:
+        raise WorkflowError(f"{variant} 拼版结果使用旧 QA 契约；请用当前 Skill 重新生成")
+    if str(result.get("runtimeSha256") or "") != current_imposition_runtime_sha256():
+        raise WorkflowError(f"{variant} 拼版结果由不同版本脚本生成；请用当前 Skill 重新生成")
+
+
+def validate_imposition_qa(path: Path, variant: str) -> None:
+    qa = read_json(path)
+    if qa.get("schema") != "illustrator-imposition/1.0" or int(qa.get("qaContractVersion") or 0) != IMPOSITION_QA_CONTRACT_VERSION:
+        raise WorkflowError(f"{variant} 拼版 QA 文件版本过旧或格式不受支持")
+    if str(qa.get("variant") or "") != variant:
+        raise WorkflowError(f"拼版 QA 版本不匹配：期望 {variant}，实际 {qa.get('variant')}")
+    if not qa.get("editableObjectsPreserved") or float(qa.get("bleedPt", -1)) != 0:
+        raise WorkflowError(f"{variant} 拼版未通过可编辑对象或零出血校验")
+    if int(qa.get("artboardCount") or 0) <= 0:
+        raise WorkflowError(f"{variant} 拼版 QA 缺少有效画板数量")
+    if variant == "AB":
+        source = qa.get("sourceCounts") or {}
+        output = qa.get("outputCounts") or {}
+        if int(source.get("topLevelItems", -1)) != int(output.get("topLevelItems", -2)):
+            raise WorkflowError("AB 拼版前后顶层可编辑对象数量不一致")
+        accounted = int(qa.get("mappedTopLevelItems") or 0) + int(qa.get("preservedTopLevelItems") or 0)
+        if accounted != int(output.get("topLevelItems", -1)):
+            raise WorkflowError("AB 拼版存在未追踪的顶层对象")
+    elif int(qa.get("expectedTopLevelItems", -1)) != int(qa.get("outputTopLevelItems", -2)):
+        raise WorkflowError(f"{variant} 版拆分前后顶层可编辑对象数量不一致")
+
+
+def _verified_artifacts(result: dict[str, Any], allowed_root: Path, *, required: set[str], variant: str) -> list[dict[str, Any]]:
+    validate_imposition_result_contract(result, variant)
+    artifacts = list(result.get("artifacts") or [])
+    available = {str(item.get("type") or "") for item in artifacts}
+    missing = sorted(required - available)
+    if missing:
+        raise WorkflowError(f"{result.get('language')} 缺少拼版产物：{', '.join(missing)}")
+    if sum(1 for item in artifacts if item.get("type") == "imposition_qa") != 1:
+        raise WorkflowError(f"{variant} 拼版必须且只能包含一个 QA 文件")
+    verified = []
+    for item in artifacts:
+        source = Path(str(item.get("path") or "")).resolve()
+        if not source.is_file() or not source.is_relative_to(allowed_root.resolve()):
+            raise WorkflowError(f"拼版产物不在受控 preview 目录：{source}")
+        if not item.get("sha256") or sha256(source) != item["sha256"]:
+            raise WorkflowError(f"拼版产物在确认后发生变化：{source.name}")
+        if item.get("type") == "imposition_qa":
+            validate_imposition_qa(source, variant)
+        verified.append({**item, "path": str(source)})
+    return verified
+
+
+def command_impose_ab(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "ready_to_impose_ab", "blocked_ab_imposition", "waiting_ab_confirmation")
+    ensure_input_hashes(project, state)
+    sources = electronic_sources(project, state)
+    imposition = imposition_import()
+    layout_rules = read_json(project / state["template"]["layoutRulesPath"])
+    current_rules_source = Path(str(state["template"].get("layoutRulesSource") or "")).expanduser()
+    if current_rules_source.is_file():
+        current_rules = read_json(current_rules_source)
+        if str(current_rules.get("templateSha256") or "") == str(state["template"].get("sha256") or ""):
+            layout_rules["impositionPolicy"] = dict(current_rules.get("impositionPolicy") or layout_rules.get("impositionPolicy") or {})
+    results, blocking = [], []
+    for language in expected_languages(state):
+        output_dir = project / "preview" / language / "imposition" / "AB"
+        result = imposition.impose_ab_job({
+            "language": language,
+            "sourceAI": str(sources[language]["ai"]),
+            "sourcePDF": str(sources[language]["pdf"]),
+            "outputDir": str(output_dir),
+            "outputName": f"manual-{language}-AB打印版",
+            "layoutRules": layout_rules,
+        }, execute=not args.no_execute)
+        results.append({"language": language, **result})
+        blocking.extend({"language": language, **issue} for issue in result.get("qualityIssues") or [] if issue.get("level") == "blocking")
+    output = project / "work" / "imposition-ab-results.json"
+    write_json(output, {"results": results, "blocking": blocking})
+    state["abImpositionResultsPath"] = relative(project, output)
+    state["blockingIssues"] = blocking
+    state["blockingPhase"] = "ab_imposition" if blocking else None
+    state["stage"] = "ready_to_impose_ab" if args.no_execute else ("blocked_ab_imposition" if blocking else "waiting_ab_confirmation")
+    save_state(project, state)
+    print(json.dumps({
+        "stage": state["stage"], "results": str(output), "blockingIssues": blocking,
+        "message": "请逐语种确认 AB AI/PDF，确认后运行 confirm-ab" if not blocking and not args.no_execute else "请根据 userAction 处理阻塞问题后重试",
+    }, ensure_ascii=False, indent=2))
+
+
+def command_confirm_ab(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "waiting_ab_confirmation")
+    ensure_input_hashes(project, state)
+    payload = read_json(project / state["abImpositionResultsPath"])
+    results = payload.get("results") or []
+    if [item.get("language") for item in results] != expected_languages(state):
+        raise WorkflowError("AB 结果语种集不完整或顺序不一致")
+    confirmed = []
+    for result in results:
+        if result.get("status") != "succeeded" or result.get("qualityIssues"):
+            raise WorkflowError(f"{result.get('language')} AB 版尚未通过自动校验")
+        root = project / "preview" / result["language"] / "imposition" / "AB"
+        artifacts = _verified_artifacts(result, root, required={"ai", "pdf", "imposition_qa", "imposition_manifest", "page_png"}, variant="AB")
+        manifest_path = Path(result["manifest"]).resolve()
+        confirmed.append({
+            "language": result["language"], "confirmedAt": now(), "artifacts": artifacts,
+            "sourceAI": result["outputs"]["ai"], "sourceAISha256": sha256(Path(result["outputs"]["ai"])),
+            "abManifest": read_json(manifest_path),
+        })
+    manifest = project / "work" / "confirmed-ab-manifest.json"
+    write_json(manifest, {"projectSchema": SCHEMA, "confirmedAt": now(), "results": confirmed})
+    state["abConfirmedAt"] = now()
+    state["confirmedAbManifestPath"] = relative(project, manifest)
+    state["blockingIssues"] = []
+    state.pop("blockingPhase", None)
+    state["stage"] = "ready_to_split_ab"
+    save_state(project, state)
+    print(json.dumps({"stage": state["stage"], "manifest": str(manifest), "next": "运行 split-a-b 生成 A 版和 B 版"}, ensure_ascii=False, indent=2))
+
+
+def command_split_a_b(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "ready_to_split_ab", "blocked_a_b_split")
+    ensure_input_hashes(project, state)
+    imposition = imposition_import()
+    confirmed = read_json(project / state["confirmedAbManifestPath"]).get("results") or []
+    if [item.get("language") for item in confirmed] != expected_languages(state):
+        raise WorkflowError("已确认 AB 语种集不完整或顺序不一致")
+    results, blocking = [], []
+    for item in confirmed:
+        language = item["language"]
+        result = imposition.split_ab_job({
+            "language": language, "sourceAI": item["sourceAI"], "sourceAISha256": item["sourceAISha256"],
+            "abManifest": item["abManifest"], "outputDir": str(project / "preview" / language / "imposition"),
+            "outputPrefix": f"manual-{language}",
+        }, execute=not args.no_execute)
+        results.append({"language": language, **result})
+        blocking.extend({"language": language, **issue} for issue in result.get("qualityIssues") or [] if issue.get("level") == "blocking")
+    output = project / "work" / "split-a-b-results.json"
+    write_json(output, {"results": results, "blocking": blocking})
+    state["splitResultsPath"] = relative(project, output)
+    state["blockingIssues"] = blocking
+    state["blockingPhase"] = "a_b_split" if blocking else None
+    state["stage"] = "ready_to_split_ab" if args.no_execute else ("blocked_a_b_split" if blocking else "waiting_a_b_confirmation")
+    save_state(project, state)
+    print(json.dumps({
+        "stage": state["stage"], "results": str(output), "blockingIssues": blocking,
+        "message": "请确认每个语种的 A/B AI/PDF，确认后运行 confirm-a-b" if not blocking and not args.no_execute else "请处理阻塞问题后重试",
+    }, ensure_ascii=False, indent=2))
+
+
+def command_confirm_a_b(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "waiting_a_b_confirmation")
+    ensure_input_hashes(project, state)
+    split_results = read_json(project / state["splitResultsPath"]).get("results") or []
+    confirmed_ab = read_json(project / state["confirmedAbManifestPath"]).get("results") or []
+    if [item.get("language") for item in split_results] != expected_languages(state):
+        raise WorkflowError("A/B 结果语种集不完整或顺序不一致")
+    verified_sources: list[dict[str, Any]] = []
+    for item in confirmed_ab:
+        language = item["language"]
+        for artifact in item["artifacts"]:
+            source = Path(artifact["path"]).resolve()
+            if not source.is_file() or sha256(source) != artifact["sha256"]:
+                raise WorkflowError(f"{language} AB 产物在确认后发生变化：{source.name}")
+            verified_sources.append({"language": language, "variant": "AB", "type": artifact["type"], "source": source, "sha256": artifact["sha256"]})
+    for result in split_results:
+        language = result["language"]
+        if result.get("status") != "succeeded" or result.get("qualityIssues"):
+            raise WorkflowError(f"{language} A/B 版尚未通过自动校验")
+        for variant in ("A", "B"):
+            variant_result = result.get("variants", {}).get(variant) or {}
+            root = project / "preview" / language / "imposition" / variant
+            artifacts = _verified_artifacts(variant_result, root, required={"ai", "pdf", "imposition_qa", "page_png"}, variant=variant)
+            for artifact in artifacts:
+                source = Path(artifact["path"])
+                verified_sources.append({"language": language, "variant": variant, "type": artifact["type"], "source": source, "sha256": artifact["sha256"]})
+
+    confirmed_at = now()
+    state["aBConfirmedAt"] = confirmed_at
+    state["blockingIssues"] = []
+    state.pop("blockingPhase", None)
+    if args.no_delivery_package:
+        manifest = project / "work" / "confirmed-a-b-manifest.json"
+        write_json(manifest, {
+            "projectSchema": SCHEMA,
+            "confirmedAt": confirmed_at,
+            "deliveryPackageGenerated": False,
+            "files": [{
+                "language": item["language"], "variant": item["variant"], "type": item["type"],
+                "path": relative(project, item["source"]), "sha256": item["sha256"],
+            } for item in verified_sources],
+            "printProfile": {"duplexFlip": "short-edge", "scalePercent": 100, "centered": True, "shrinkToFit": False, "bleedPt": 0},
+        })
+        state["stage"] = "completed_without_delivery"
+        state["confirmedABSplitManifestPath"] = relative(project, manifest)
+        state["deliveryPackageGenerated"] = False
+        save_state(project, state)
+        print(json.dumps({
+            "stage": state["stage"], "manifest": str(manifest), "deliveryPackageGenerated": False,
+        }, ensure_ascii=False, indent=2))
+        return
+
+    files = list(read_json(project / state["electronicManifestPath"]).get("files") or [])
+    imposition_files: list[dict[str, Any]] = []
+    for item in verified_sources:
+        source = item["source"]
+        target = project / "delivery" / item["language"] / item["variant"] / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        imposition_files.append({
+            "language": item["language"], "variant": item["variant"], "type": item["type"],
+            "path": relative(project, target), "sha256": sha256(target),
+        })
+    imposition_manifest = project / "delivery" / "imposition-manifest.json"
+    write_json(imposition_manifest, {
+        "projectSchema": SCHEMA, "confirmedAt": now(), "files": imposition_files,
+        "printProfile": {"duplexFlip": "short-edge", "scalePercent": 100, "centered": True, "shrinkToFit": False, "bleedPt": 0},
+    })
+    files.extend(imposition_files)
     manifest = project / "delivery" / "delivery-manifest.json"
-    write_json(manifest, {"projectSchema": SCHEMA, "deliveredAt": now(), "files": delivered})
+    write_json(manifest, {"projectSchema": SCHEMA, "deliveredAt": now(), "files": files})
     state["stage"] = "delivered"
+    state["impositionManifestPath"] = relative(project, imposition_manifest)
     state["deliveredAt"] = now()
     state["deliveryManifestPath"] = relative(project, manifest)
+    state["deliveryPackageGenerated"] = True
     save_state(project, state)
     print(json.dumps({"stage": state["stage"], "delivery": str(project / "delivery"), "manifest": str(manifest)}, ensure_ascii=False, indent=2))
 
@@ -1364,6 +1816,13 @@ def command_status(args: argparse.Namespace) -> None:
         "ready_to_render": "运行 render",
         "waiting_layout_confirmation": "等待用户查看预览 PDF 并明确确认版式",
         "blocked": "处理阻塞问题后重新 render",
+        "ready_to_impose_ab": "运行 impose-ab 生成中文及全部目标语种 AB 版",
+        "blocked_ab_imposition": "按 blockingIssues.userAction 修复电子版后重新运行 impose-ab",
+        "waiting_ab_confirmation": "等待用户确认全部语种 AB 版，然后运行 confirm-ab",
+        "ready_to_split_ab": "运行 split-a-b 从已确认 AB AI 生成 A/B 版",
+        "blocked_a_b_split": "按 blockingIssues.userAction 处理后重新运行 split-a-b",
+        "waiting_a_b_confirmation": "等待用户确认全部语种 A/B 版，然后运行 confirm-a-b",
+        "completed_without_delivery": "A/B 已确认，用户选择不生成 delivery 交付包",
         "delivered": "交付完成",
     }
     print(json.dumps({"project": str(project), "stage": state["stage"], "next": messages.get(state["stage"], "未知"), "workbook": str(project / state.get("workbookPath", "")), "languages": state.get("languages", []), "blockingIssues": state.get("blockingIssues", [])}, ensure_ascii=False, indent=2))
@@ -1372,6 +1831,7 @@ def command_status(args: argparse.Namespace) -> None:
 def command_doctor(args: argparse.Namespace) -> None:
     extract_sources, illustrator_worker = repo_imports()
     del extract_sources
+    imposition = imposition_import()
     pdftoppm = shutil.which("pdftoppm")
     if not pdftoppm:
         raise WorkflowError("缺少 pdftoppm；无法生成正式逐页 PDF 校对图")
@@ -1385,6 +1845,7 @@ def command_doctor(args: argparse.Namespace) -> None:
         "artifactToolModule": str(module),
         "pdftoppm": pdftoppm,
         "illustratorWorker": report,
+        "impositionSchema": imposition.SCHEMA,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if not payload["ok"]:
@@ -1408,6 +1869,12 @@ def build_parser() -> argparse.ArgumentParser:
     optimize.add_argument("--content-json", required=True)
     export = sub.add_parser("export-chinese", help="根据已固化的 AI 优化结果创建中文确认 Excel")
     export.add_argument("--project", required=True)
+    refresh = sub.add_parser("refresh-chinese", help="用新中文 JSON 重建确认书并使下游确认失效")
+    refresh.add_argument("--project", required=True)
+    refresh.add_argument("--content-json", required=True)
+    resolve = sub.add_parser("resolve-conflicts", help="固化全部高严重度规格冲突的明确处理结论")
+    resolve.add_argument("--project", required=True)
+    resolve.add_argument("--resolutions-json", required=True)
     confirm = sub.add_parser("confirm-chinese", help="在用户整表确认后回读最终中文")
     confirm.add_argument("--project", required=True)
     append = sub.add_parser("append-translations", help="向同一 Excel 追加多语种翻译 Sheet")
@@ -1430,8 +1897,19 @@ def build_parser() -> argparse.ArgumentParser:
     render_source.add_argument("--no-execute", action="store_true")
     confirm_source = sub.add_parser("confirm-source-chinese-layout", help="确认中文版 AI/PDF 后开放其他语种 Excel")
     confirm_source.add_argument("--project", required=True)
-    layout = sub.add_parser("confirm-layout", help="在用户确认预览 PDF 后形成正式交付")
+    layout = sub.add_parser("confirm-layout", help="确认全部电子版 AI/PDF 并进入 AB 拼版")
     layout.add_argument("--project", required=True)
+    impose = sub.add_parser("impose-ab", help="为中文和全部目标语种生成可编辑 AB AI/PDF")
+    impose.add_argument("--project", required=True)
+    impose.add_argument("--no-execute", action="store_true")
+    confirm_ab = sub.add_parser("confirm-ab", help="确认全部语种 AB 版后开放 A/B 拆分")
+    confirm_ab.add_argument("--project", required=True)
+    split = sub.add_parser("split-a-b", help="从已确认 AB AI 生成可编辑 A/B AI/PDF")
+    split.add_argument("--project", required=True)
+    split.add_argument("--no-execute", action="store_true")
+    confirm_split = sub.add_parser("confirm-a-b", help="确认 A/B 版并形成最终交付")
+    confirm_split.add_argument("--project", required=True)
+    confirm_split.add_argument("--no-delivery-package", action="store_true", help="仅记录 A/B 确认和哈希清单，不复制文件或生成 delivery 交付包")
     status = sub.add_parser("status", help="显示当前阶段和下一步")
     status.add_argument("--project", required=True)
     return parser
@@ -1444,6 +1922,8 @@ def main() -> int:
         "init": command_init,
         "optimize-chinese": command_optimize_chinese,
         "export-chinese": command_export_chinese,
+        "refresh-chinese": command_refresh_chinese,
+        "resolve-conflicts": command_resolve_conflicts,
         "confirm-chinese": command_confirm_chinese,
         "append-translations": command_append_translations,
         "confirm-translations": command_confirm_translations,
@@ -1454,6 +1934,10 @@ def main() -> int:
         "render-source-chinese": command_render_source_chinese,
         "confirm-source-chinese-layout": command_confirm_source_chinese_layout,
         "confirm-layout": command_confirm_layout,
+        "impose-ab": command_impose_ab,
+        "confirm-ab": command_confirm_ab,
+        "split-a-b": command_split_a_b,
+        "confirm-a-b": command_confirm_a_b,
         "status": command_status,
     }
     try:

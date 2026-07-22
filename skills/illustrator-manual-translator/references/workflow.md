@@ -31,10 +31,20 @@ customer-project/
   review/       # the single customer workbook
   work/         # state, AI task inputs, confirmed JSON, render jobs
   preview/      # AI/PDF/PNG before final layout confirmation
-  delivery/     # final confirmed deliverables
+  delivery/     # only user-confirmed electronic + AB/A/B deliverables
 ```
 
 The next AI task is described in `work/content-optimization-input.json`.
+
+If `work/conflict-review-input.json` contains high-severity conflicts, obtain explicit conclusions and record all of them before Chinese confirmation:
+
+```bash
+python3 scripts/manual_workflow.py resolve-conflicts \
+  --project "/path/to/customer-project" \
+  --resolutions-json "/path/to/conflict-resolutions.json"
+```
+
+Each row must contain the original `conflictId`, `status: resolved`, and a non-empty factual `resolution`. Review placeholders such as `请确认`, `待确认`, `TODO`, or `TBD` are rejected.
 
 ## 2. AI-optimize Chinese and create the review workbook
 
@@ -55,6 +65,14 @@ python3 scripts/manual_workflow.py export-chinese \
 
 Return `review/说明书内容确认.xlsx` to the user. Ask them to inspect the evidence and edit only the yellow `最终中文` column.
 
+If the Chinese JSON changes after the workbook has already moved beyond this stage, rebuild the Chinese Sheet and invalidate the old confirmation chain:
+
+```bash
+python3 scripts/manual_workflow.py refresh-chinese \
+  --project "/path/to/customer-project" \
+  --content-json "/path/to/chinese-rows.json"
+```
+
 Stop. Do not run the next command until the user explicitly says the Chinese content is confirmed.
 
 ```bash
@@ -72,7 +90,7 @@ python3 scripts/manual_workflow.py append-assets --project "/path/to/customer-pr
 python3 scripts/manual_workflow.py confirm-assets --project "/path/to/customer-project"
 ```
 
-The Sheet visibly embeds images extracted from the specification. The user deletes or pastes a real image in the yellow `最终使用图片` area and never types an image ID. `confirm-assets` reads the selected image bytes from the `.xlsx` package and converts them to internal content-hash assets. Even when the specification contains no extracted images, append the Sheet and require whole-file image confirmation; optional empty slots follow `emptyBehavior`.
+The Sheet visibly embeds images extracted from the specification. The user deletes or pastes a real image in the yellow `最终使用图片` area and never types an image ID. `confirm-assets` reads the selected image bytes from the `.xlsx` package and converts them to internal content-hash assets. Even when the specification contains no extracted images, append the Sheet and require whole-file image confirmation; optional empty slots follow `emptyBehavior`. With `keep_template`, both the original template visual and its original bound label remain unchanged; a label is rewritten only when that slot has a newly selected image.
 
 After the user explicitly replies `图片内容已确认`, generate the Chinese proof:
 
@@ -106,7 +124,7 @@ Stop. Do not run the next command until the user explicitly says the translation
 python3 scripts/manual_workflow.py confirm-translations --project "/path/to/customer-project"
 ```
 
-## 5. Render Target Languages And QA
+## 5. Render Target Languages And Confirm Electronic Editions
 
 ```bash
 python3 scripts/manual_workflow.py render --project "/path/to/customer-project"
@@ -120,7 +138,49 @@ Show the PDFs or page PNGs to the user. Stop until the user explicitly confirms 
 python3 scripts/manual_workflow.py confirm-layout --project "/path/to/customer-project"
 ```
 
-The final `delivery/` must contain `.ai`, `.pdf`, QA JSON, page previews, and `delivery-manifest.json` with hashes.
+This freezes the Chinese and every target-language electronic AI/PDF. It does not finish delivery.
+
+## 6. Generate And Confirm AB Editions
+
+```bash
+python3 scripts/manual_workflow.py impose-ab --project "/path/to/customer-project"
+```
+
+The independent imposition module moves native Illustrator objects inside the same document. It must preserve editable text, vectors, images, and layers; placing or rasterizing whole PDF pages is forbidden. It builds the canonical sequence from the electronic edition's physical half-pages: `front cover -> every non-cover half-page in artboard left/right order -> fully empty padding -> back cover`. Printed page-number text is used only to detect duplicate or missing labels; it never changes physical imposition order. Padding is inserted only after the last physical body page and before the back cover. The module writes AB AI/PDF plus an imposition manifest and page previews for every language.
+
+The AB run blocks the whole language batch when any language contains a centerline-crossing object, an unrecognized page, duplicate or missing page numbers, inconsistent page size, bleed, page/artboard-count drift, or an invalid left/right plan. Each blocking issue contains a concrete `userAction`.
+
+After the user explicitly confirms every AB edition:
+
+```bash
+python3 scripts/manual_workflow.py confirm-ab --project "/path/to/customer-project"
+```
+
+## 7. Split And Confirm A/B Editions
+
+Only a hash-confirmed AB AI may be split:
+
+```bash
+python3 scripts/manual_workflow.py split-a-b --project "/path/to/customer-project"
+```
+
+A is the front-side set (`AB` artboards 0, 2, 4, ...); B is the back-side set (1, 3, 5, ...). Both remain editable AI and also produce PDF, QA JSON, and page previews. The A/B sets must be disjoint and their union must exactly equal AB.
+
+After the user explicitly confirms every A and B edition:
+
+```bash
+python3 scripts/manual_workflow.py confirm-a-b --project "/path/to/customer-project"
+```
+
+If the user confirms A/B but explicitly does not want a delivery package, use:
+
+```bash
+python3 scripts/manual_workflow.py confirm-a-b --project "/path/to/customer-project" --no-delivery-package
+```
+
+This verifies every confirmed hash, writes `work/confirmed-a-b-manifest.json`, and finishes at `completed_without_delivery`. It must not create or modify `delivery/`.
+
+When packaging is requested, the final `delivery/` contains electronic, AB, A, and B `.ai`/`.pdf` files, QA JSON, page previews, `imposition-manifest.json`, and `delivery-manifest.json` with hashes. The print contract is fixed: short-edge flip, 100% actual size, centered, no scaling/shrink-to-fit, and zero bleed.
 
 ## Recovery And Status
 

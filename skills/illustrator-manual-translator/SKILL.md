@@ -21,8 +21,17 @@ Run the customer workflow through files and chat. Do not start or require the re
 - Image confirmation is mandatory even when the specification contains no extracted images; optional empty slots retain or hide template visuals according to `emptyBehavior`.
 - Reject template onboarding when `visualSlots` is empty. Never skip the image gate or advance directly from translation confirmation to rendering.
 - Never infer confirmation from the existence, save time, or hash of the workbook.
+- Treat every `severity=high` extraction conflict as blocking. Record an explicit `resolved` conclusion with `resolve-conflicts` before Chinese confirmation; never print `请确认`, `待确认`, `TODO`, `TBD`, or equivalent review notes as manual copy.
 - Apply the template typography policy consistently across languages. For `fixed-template-standard`, never shrink the configured body size or leading to fit; expand, move, paginate, or block instead.
 - When the Illustrator template hash matches a bundled template profile, use that profile automatically. An explicit `--layout-rules` path always overrides bundled profile discovery.
+- Treat the enhanced file workflow as the only production baseline. Electronic layout confirmation is not final delivery.
+- Generate AB AI/PDF for Chinese and every target language, wait for explicit AB confirmation, and only then generate A and B.
+- AB, A, and B AI files must preserve editable text, vectors, images, and layers. Never place, flatten, or rasterize a whole PDF page as an imposition shortcut.
+- Treat every non-cover half-page in the electronic edition as a physical body page, including unnumbered decorative or intentionally blank halves. Printed page numbers are validation labels only and never determine imposition order. Insert any additional padding only after the last physical body page and before the back cover; generated padding must contain no page number, Logo, or other object.
+- Block imposition when an object crosses the centerline, a page is unrecognized, or a page number is duplicated. Return an actionable `userAction`; do not guess.
+- Validate missing/duplicate pages, left/right order, the exact A+B partition of AB, page size, zero bleed, PDF page count, and Illustrator artboard count.
+- Use the fixed print contract: short-edge flip, 100% actual size, centered, no scaling or shrink-to-fit, and zero bleed.
+- `confirm-a-b` generates the complete delivery package by default on every run. Only when the user explicitly declines the package for that specific run may you add `--no-delivery-package`; the exception is not a saved preference for later projects or reruns.
 
 ## Project Command
 
@@ -44,7 +53,7 @@ The script deliberately does not call a fixed model provider. The agent running 
 
 ### Optimize technical content into user-facing Chinese
 
-After `init`, read `work/content-optimization-input.json`. First preserve the extracted facts, then rewrite technical material into concise, user-readable manual copy. Explain necessary terms, organize operation and safety content as actionable steps, and never invent a capability, benefit, certification, or safety claim. For `contentSource=template-copy`, quote the exact `templateText` in `sourceEvidence` and localize fixed headings or brand copy instead of leaving them empty.
+After `init`, read `work/content-optimization-input.json`. First preserve the extracted facts, then rewrite technical material into concise, user-readable manual copy. Explain necessary terms, organize operation and safety content as actionable steps, and never invent a capability, benefit, certification, or safety claim. For every field, prefer matching specification evidence; when the specification does not provide that content, use and localize the field's `templateText` as the default instead of treating the field as omitted.
 
 Write exactly one row for every `templateFields[].fieldId`:
 
@@ -57,6 +66,7 @@ Write exactly one row for every `templateFields[].fieldId`:
       "sourceEvidence": "规格书表 2：额定功率 45 W",
       "aiChinese": "额定功率：45 W",
       "optimizationNote": "保留参数，并改写为用户可直接识别的参数短句",
+      "contentOrigin": "product-evidence",
       "required": true,
       "protectedTokens": ["45 W"]
     }
@@ -64,7 +74,9 @@ Write exactly one row for every `templateFields[].fieldId`:
 }
 ```
 
-Use only evidence in `canonicalProduct`, except fields explicitly marked `contentSource=template-copy`. Do not invent missing facts. Keep model numbers, units, certifications, URLs, and legal entity names in `protectedTokens`. Translate or localize role labels such as `Manufacturer` and `Producer`, but preserve the registered legal entity name itself unless the source provides an official localized legal name. When a template field provides `fieldNameHint`, copy it exactly into `fieldName` so the customer can recognize legal-name rows in Excel. Every non-empty `aiChinese` requires both traceable `sourceEvidence` and a concise `optimizationNote`. Required fields may not be empty. An inapplicable optional field may have empty `aiChinese`.
+Use matching evidence in `canonicalProduct` first. If the specification does not provide content for a field, set `contentOrigin=template-default`, quote that field's exact `templateText` in `sourceEvidence`, and place its localized default content in `aiChinese`; this is a retained template default, not missing confirmation content. This rule applies uniformly to every field with non-empty `templateText`, including optional fields, contact details, addresses, websites, service notes, packaging text, and component lists. Do not suppress a template default merely because it appears product-specific or is not corroborated by the specification; the specification overrides it only when it supplies that field. Do not invent facts beyond those two sources. Keep model numbers, units, certifications, URLs, and legal entity names in `protectedTokens`. Translate or localize role labels such as `Manufacturer` and `Producer`, but preserve the registered legal entity name itself unless the source provides an official localized legal name. `contentOrigin` is mandatory on every row. Every non-empty `aiChinese` requires both traceable `sourceEvidence` and a concise `optimizationNote`. A field with non-empty `templateText` may not have empty `aiChinese`.
+
+If Chinese content changes after the workbook has already entered a later confirmation stage, run `refresh-chinese --project ... --content-json ...`. It rebuilds the Chinese Sheet from the latest `aiChinese`, initializes the yellow `finalChinese` cells from that latest content, backs up the old workbook, and invalidates all downstream image, layout, and translation confirmations.
 
 Run `optimize-chinese` to validate and freeze the AI rewrite. Only after it advances to `ready_to_export_chinese` may `export-chinese` create the Chinese Excel workbook.
 
@@ -88,15 +100,17 @@ Translate only `finalChinese`. Empty Chinese remains empty. Preserve protected t
 
 ## Confirmation Semantics
 
-The user may freely correct the yellow final-content column, including correcting a model number or quantity proposed by AI. After the user explicitly confirms, run the matching `confirm-*` command. The commands validate stable IDs, read-only columns, template-required content, source hashes, and the full expected row set. Translation confirmation also verifies numbers, units, and model-like tokens derived from the confirmed Chinese.
+The user may freely correct the yellow final-content column, including correcting a model number or quantity proposed by AI. High-severity source conflicts listed in `work/conflict-review-input.json` require explicit final conclusions through `resolve-conflicts`; editing copy alone does not silently resolve source conflicts. After the user explicitly confirms, run the matching `confirm-*` command. The commands validate stable IDs, read-only columns, template-required content, source hashes, the full expected row set, and absence of review-only placeholders. Translation confirmation also verifies numbers, units, and model-like tokens derived from the confirmed Chinese.
 
 If validation fails, explain the affected Excel row and ask the user to correct the workbook. Do not bypass the check and do not add a status field.
 
 ## Layout And Delivery
 
-After Chinese confirmation, append the `图片与视觉资产` Sheet and wait for the exact whole-file confirmation `图片内容已确认`. Every onboarded template must define at least one semantic `visualSlots` entry; a missing or empty list is a blocking template error. Embed each unmarked specification image exactly once in a shared candidate gallery. A valid `[ASSET: slot]` marker auto-fills the matching slot and removes that image from the unassigned gallery. Each slot displays only its current suggested final image. An empty optional slot defaults to retaining the original template visual. The customer edits only the yellow `最终使用图片` area by deleting or pasting an image.
+After Chinese confirmation, append the `图片与视觉资产` Sheet and wait for the exact whole-file confirmation `图片内容已确认`. Every onboarded template must define at least one semantic `visualSlots` entry; a missing or empty list is a blocking template error. Embed each unmarked specification image exactly once in a shared candidate gallery. A valid `[ASSET: slot]` marker auto-fills the matching slot and removes that image from the unassigned gallery. Each slot displays only its current suggested final image. An empty optional slot may retain the original template visual according to `emptyBehavior=keep_template`; when retained, its original nearby product/model label must also remain unchanged. Only a newly selected image may trigger that slot's label rewrite. The customer edits only the yellow `最终使用图片` area by deleting or pasting an image.
 
-After image confirmation, `render-source-chinese` is mandatory. Show the Chinese proof and wait for explicit layout confirmation before running `confirm-source-chinese-layout`; only that command creates the translation-generation input. After translation confirmation, run `render` for target languages, show their proofs, and use `confirm-layout` for final delivery. Both render phases verify persisted confirmations, hashes, overflow, safe bounds, typography, and image rules.
+After image confirmation, `render-source-chinese` is mandatory. Show the Chinese proof and wait for explicit layout confirmation before running `confirm-source-chinese-layout`; only that command creates the translation-generation input. After translation confirmation, run `render` for target languages and show their proofs. `confirm-layout` freezes all electronic editions and advances to `impose-ab`; it does not deliver. After every AB edition is explicitly confirmed, run `confirm-ab`, then `split-a-b`. Only after every A/B edition is explicitly confirmed may `confirm-a-b` create final delivery. All render and imposition phases verify persisted confirmations and hashes.
+
+For generated live titles that replace outlined template text, always prefer the current render item's language-specific font over the template's original font. Keep the title above its title-bar artwork, align the visible glyph bounds to the bottom of the title bar with the configured bottom inset, and repeat the same visible title, font, and bottom alignment on every continuation artboard. A generated TextFrame without visible glyphs or without the required bottom alignment is a layout failure.
 
 Use `--no-execute` only to inspect generated JSX. A dry run must not advance the project to layout confirmation.
 
@@ -111,3 +125,4 @@ The bundled `assets/template-profiles/aeolus-ft802led/layout-rules.v1.json` prof
 - `references/translation-schema.md`: AI-only JSON inputs and outputs.
 - `references/visual-assets.md`: semantic image slots, DPI rules, and asset replacement behavior.
 - `references/limitations.md`: Illustrator, font, outlined-text, and template risks.
+- `references/imposition.md`: exact physical-page AB/A/B ordering, rejection recovery, validation, and optional no-package completion. Read it before any imposition command.

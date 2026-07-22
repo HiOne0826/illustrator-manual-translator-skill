@@ -886,6 +886,17 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     return frame;
   }}
   function translateY(item, delta) {{ if (item && Math.abs(delta) > 0.01) item.translate(0, delta); }}
+  function ensureTitleVisibleAboveBar(title, bar, label, adjustments, violations) {{
+    if (!title || !bar) {{ violations.push(label + ":missing-title-or-bar"); return; }}
+    try {{
+      title.hidden = false;
+      title.opacity = 100;
+      title.zOrder(ZOrderMethod.BRINGTOFRONT);
+      app.redraw();
+      if (!normalize(title.contents)) violations.push(label + ":empty-title");
+      else adjustments.push(label + ":title-brought-to-front");
+    }} catch (visibilityError) {{ violations.push(label + ":title-visibility-unavailable"); }}
+  }}
   function applyTitleBarFill(bar, behavior, label, adjustments, violations) {{
     var cmyk = (behavior && behavior.titleBarFillCMYK) || [0, 0, 0, 57];
     if (!bar || cmyk.length !== 4) return;
@@ -982,6 +993,10 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var midpoint = Math.ceil(items.length / 2);
     left.contents = joinParagraphs(items, 0, midpoint); right.contents = joinParagraphs(items, midpoint, items.length);
     adjustments.push(region.id + ":balanced-" + items.length + "-items-" + midpoint + "+" + (items.length - midpoint));
+    if (behavior.rightColumnLeftPt !== undefined && behavior.rightColumnLeftPt !== null) {{
+      moveTopLeft(right, Number(behavior.rightColumnLeftPt), Number(right.geometricBounds[1]));
+      adjustments.push(region.id + ":right-column-left-" + Number(behavior.rightColumnLeftPt));
+    }}
     var minSize = Number(behavior.minFontSizePt || 7), size = Math.min(Number(left.textRange.characterAttributes.size || 8), Number(right.textRange.characterAttributes.size || 8));
     var maxWidth = Number(behavior.columnWidthPt || 125), bottomBound = Number(behavior.bottomBound || -1150);
     var preserveFontSize = bodyFontIsLocked(leftIndex) || bodyFontIsLocked(rightIndex);
@@ -994,7 +1009,15 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     }}
     if (!preserveFontSize && size < 8) adjustments.push(region.id + ":font-size-" + size);
     if (preserveFontSize) adjustments.push(region.id + ":template-font-size-preserved-" + size);
-    var finalLeft = left.geometricBounds, finalRight = right.geometricBounds, finalBottom = Math.min(Number(finalLeft[3]), Number(finalRight[3]));
+    var finalLeft = left.geometricBounds, finalRight = right.geometricBounds;
+    var minColumnGap = Number(behavior.minColumnGapPt || 8);
+    if (Number(finalLeft[2]) + minColumnGap > Number(finalRight[0])) {{
+      var rightShift = Number(finalLeft[2]) + minColumnGap - Number(finalRight[0]);
+      right.translate(rightShift, 0);
+      adjustments.push(region.id + ":right-column-auto-shift-" + Math.round(rightShift * 10) / 10);
+      finalRight = right.geometricBounds;
+    }}
+    var finalBottom = Math.min(Number(finalLeft[3]), Number(finalRight[3]));
     if (finalBottom < bottomBound) {{
       var upward = Math.min(Number(behavior.maxUpwardShiftPt || 18), bottomBound - finalBottom);
       translateY(left, upward); translateY(right, upward);
@@ -1002,6 +1025,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       finalLeft = left.geometricBounds; finalRight = right.geometricBounds;
     }}
     if (Number(finalLeft[2]) - Number(finalLeft[0]) > maxWidth + 0.5 || Number(finalRight[2]) - Number(finalRight[0]) > maxWidth + 0.5) violations.push(region.id + ":column-width-overflow");
+    if (Number(finalLeft[2]) + minColumnGap > Number(finalRight[0])) violations.push(region.id + ":column-overlap");
     if (Math.min(Number(finalLeft[3]), Number(finalRight[3])) < bottomBound) violations.push(region.id + ":list-height-overflow");
   }}
   function moveTopLeft(item, left, top) {{
@@ -1013,9 +1037,10 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     if (policy === "preserve") return;
     try {{
       app.redraw();
-      var barBounds = bar.geometricBounds, titleBounds = title.geometricBounds, allowedBottomBleed = 0;
+      var barBounds = bar.geometricBounds, titleBounds = title.visibleBounds, allowedBottomBleed = 0;
       if (policy === "bottom") {{
-        var bottomInset = Number((behavior || {{}}).titleBottomInsetPt || 8);
+        var configuredBottomInset = (behavior || {{}}).titleBottomInsetPt;
+        var bottomInset = configuredBottomInset === undefined || configuredBottomInset === null ? 0 : Number(configuredBottomInset);
         translateY(title, Number(barBounds[3]) + bottomInset - Number(titleBounds[3]));
       }} else if (policy === "match-reference-bottom") {{
         var referenceOffset = Number((behavior || {{}}).resolvedTitleBottomOffsetPt);
@@ -1031,7 +1056,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
         return;
       }}
       app.redraw();
-      titleBounds = title.geometricBounds;
+      titleBounds = title.visibleBounds;
       if (Number(titleBounds[1]) > Number(barBounds[1]) + 0.5 || Number(titleBounds[3]) < Number(barBounds[3]) - allowedBottomBleed - 0.5) violations.push(label + ":title-vertical-overflow");
       else adjustments.push(label + ":title-vertical-align-" + policy);
     }} catch (alignError) {{ violations.push(label + ":title-vertical-align-unavailable"); }}
@@ -1077,6 +1102,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     var titleSize = Number(title.textRange.characterAttributes.size || 45);
     while (Number(title.width) > titleWidth && titleSize > Number((section.behavior || {{}}).titleMinFontSizePt || 30)) {{ titleSize = Math.max(Number((section.behavior || {{}}).titleMinFontSizePt || 30), titleSize - 0.5); title.textRange.characterAttributes.size = titleSize; }}
     alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":continuation-" + sequence, adjustments, violations);
+    ensureTitleVisibleAboveBar(title, bar, section.id + ":continuation-" + sequence, adjustments, violations);
     adjustments.push(section.id + ":created-continuation-artboard-" + insertIndex);
     return {{body: body, pageNumber: pageNumber}};
   }}
@@ -1146,7 +1172,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     title.contents = String(replacement.text || behavior.sourceTitleText || "Service Support");
     var attrs = title.textRange.characterAttributes, size = Number(replacement.fontSize || 30), minSize = Number(behavior.titleMinFontSizePt || 30);
     attrs.size = Math.max(minSize, size);
-    var fontName = String(behavior.titleFontName || replacement.fontName || "ArialMT");
+    var fontName = String(replacement.fontName || behavior.titleFontName || "ArialMT");
     try {{ attrs.textFont = app.textFonts.getByName(fontName); }} catch (fontError) {{ violations.push(region.id + ":title-font-fallback"); }}
     try {{ var white = new RGBColor(); white.red = 255; white.green = 255; white.blue = 255; attrs.fillColor = white; }} catch (colorError) {{}}
     outline.hidden = true;
@@ -1159,6 +1185,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       try {{ attrs.horizontalScale = horizontalScale; }} catch (scaleWriteError) {{ break; }}
     }}
     alignTitleVerticallyInBar(title, bar, behavior, region.id, adjustments, violations);
+    ensureTitleVisibleAboveBar(title, bar, region.id, adjustments, violations);
     if (horizontalScale < 99.5) adjustments.push(region.id + ":title-horizontal-scale-" + horizontalScale);
     if (Number(title.width) > maxWidth + 0.5) violations.push(region.id + ":title-width-overflow");
     adjustments.push(region.id + ":outlined-title-replaced");
@@ -1178,7 +1205,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     title.contents = value;
     var attrs = title.textRange.characterAttributes;
     attrs.size = Number(behavior.titleFontSizePt || replacement.fontSize || 22);
-    try {{ attrs.textFont = app.textFonts.getByName(String(behavior.titleFontName || replacement.fontName || "TimesNewRomanPSMT")); }}
+    try {{ attrs.textFont = app.textFonts.getByName(String(replacement.fontName || behavior.titleFontName || "TimesNewRomanPSMT")); }}
     catch (fontError) {{ violations.push(region.id + ":title-font-fallback"); }}
     try {{ var white = new RGBColor(); white.red = 255; white.green = 255; white.blue = 255; attrs.fillColor = white; }} catch (colorError) {{}}
     try {{ title.rotate(Number(behavior.rotationDegrees || -45)); }} catch (rotateError) {{ violations.push(region.id + ":title-rotation-unavailable"); }}
@@ -1274,6 +1301,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":sibling-bar-width"); }}
     moveTopLeft(bar, left, top); moveTopLeft(title, left + 36, top - 8);
     alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":sibling", adjustments, violations);
+    ensureTitleVisibleAboveBar(title, bar, section.id + ":sibling", adjustments, violations);
     var fontSize = Number(body.textRange.characterAttributes.size || 7), requiredHeight = Math.max(96, estimatedWrappedLines(remainingText, width - 72, fontSize) * fontSize * 1.6 + 30);
     var availableHeight = Math.max(24, Number(targetBar.geometricBounds[3]) - Number(siblingBottom) - 72);
     if (!resizeTextFrame(body, width - 72, Math.min(availableHeight, requiredHeight))) {{ violations.push(section.id + ":sibling-body-size"); return null; }}
@@ -1292,6 +1320,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":moved-bar-width"); }}
     moveTopLeft(bar, left, top - 31.1811); moveTopLeft(title, left + 35.7573, top - 39.3774);
     alignTitleVerticallyInBar(title, bar, section.behavior || {{}}, section.id + ":moved", adjustments, violations);
+    ensureTitleVisibleAboveBar(title, bar, section.id + ":moved", adjustments, violations);
     if (!resizeTextFrame(body, width - 72, height - 153.1785)) {{ violations.push(section.id + ":moved-body-size"); return null; }}
     moveTopLeft(body, left + 36, top - 99.4478); body.contents = sourceBody.contents;
     if (pageNumber) {{ pageNumber.contents = "- " + (parsePageNumber(sourcePageNumber.contents) + sequence) + " -"; placeContinuationPageNumber(pageNumber, left, width, bottom + 22.9666, section.behavior || {{}}, section.id + ":moved", adjustments, violations); }}
@@ -1312,6 +1341,7 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
     applyTitleBarFill(bar, behavior, section.id + ":inserted", adjustments, violations);
     try {{ bar.width = width; }} catch (barWidthError) {{ violations.push(section.id + ":inserted-bar-width"); }}
     moveTopLeft(bar, left, top - 31.1811); moveTopLeft(title, left + 35.7573, top - 39.3774);
+    ensureTitleVisibleAboveBar(title, bar, section.id + ":inserted", adjustments, violations);
     if (!resizeTextFrame(body, width - 72, height - 153.1785)) {{ violations.push(section.id + ":inserted-body-size"); return null; }}
     moveTopLeft(body, left + 36, top - 99.4478); applyBodyTypographyToFrame(body, behavior, section.id + "-body", adjustments);
     var baseNumber = sourcePageNumber ? parsePageNumber(sourcePageNumber.contents) : Number(page.artboardIndex) + 1;
@@ -1368,10 +1398,9 @@ def build_render_jsx(source: Path, outputs: Mapping[str, Path], replacements: Ma
       else violations.push(operation.id + ":insufficient-first-page-space");
     }}
     var serviceBehavior = service.behavior || {{}};
-    if (String(serviceBehavior.titleVerticalAlign || "") === "match-reference-bottom") {{
-      serviceBehavior.resolvedTitleBottomOffsetPt = Number(maintenanceTitle.geometricBounds[3]) - Number(maintenanceBar.geometricBounds[3]);
-      adjustments.push(service.id + ":title-reference-bottom-offset-" + Math.round(Number(serviceBehavior.resolvedTitleBottomOffsetPt) * 100) / 100);
-    }}
+    serviceBehavior.titleVerticalAlign = "bottom";
+    serviceBehavior.titleBottomInsetPt = serviceBehavior.titleBottomInsetPt === undefined || serviceBehavior.titleBottomInsetPt === null ? 0 : Number(serviceBehavior.titleBottomInsetPt);
+    adjustments.push(service.id + ":title-bottom-align-inset-" + serviceBehavior.titleBottomInsetPt);
     var serviceTitle = createLiveOutlinedTitle(service, adjustments, violations), servicePaths = refsByType(service, "pathItem"), serviceText = refsByType(service, "textFrame"), serviceGroups = refsByType(service, "groupItem");
     if (!serviceTitle || !servicePaths.length || !serviceText.length) return;
     var serviceBar = pathAt(servicePaths[0]), maintenanceGap = Number((maintenance.behavior || {{}}).sectionGapPt || 18), serviceBarTop = Number(maintenanceBody.geometricBounds[3]) - maintenanceGap;

@@ -192,7 +192,7 @@ function writeChineseSheet(workbook, rows) {
       asText(row.fieldName),
       asText(row.sourceEvidence),
       asText(row.aiChinese),
-      asText(row.finalChinese ?? row.aiChinese),
+      asText(row.aiChinese),
       asText(row.fieldId),
     ]);
     sheet.getRange(`D5:D${lastRow}`).format.fill = "#FFF2CC";
