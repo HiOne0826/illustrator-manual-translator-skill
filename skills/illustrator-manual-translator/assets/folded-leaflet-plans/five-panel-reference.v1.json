@@ -11,6 +11,7 @@
     "minimumBodyFontPt": 5.0,
     "contentTopInset": 5.8,
     "contentBottomInset": 3.7,
+    "sectionGap": 4.0,
     "artboardGap": 31.0
   },
   "printProfile": {

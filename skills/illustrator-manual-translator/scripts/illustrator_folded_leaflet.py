@@ -13,7 +13,7 @@ import illustrator_worker
 
 SCHEMA = "illustrator-folded-leaflet/1.0"
 PLAN_SCHEMA = "folded-leaflet-plan/1.0"
-QA_CONTRACT_VERSION = 4
+QA_CONTRACT_VERSION = 5
 SIDE_NAMES = ("outside", "inside")
 DEFAULT_GEOMETRY_MM = {
     "mediaWidth": 390.0,
@@ -26,6 +26,7 @@ DEFAULT_GEOMETRY_MM = {
     "minimumBodyFontPt": 5.0,
     "contentTopInset": 5.8,
     "contentBottomInset": 3.7,
+    "sectionGap": 4.0,
     "artboardGap": 31.0,
 }
 
@@ -49,7 +50,7 @@ def normalize_geometry(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
     geometry = {**DEFAULT_GEOMETRY_MM, **dict(raw or {})}
     for key in (
         "mediaWidth", "mediaHeight", "trimLeft", "trimRight", "trimTop", "trimBottom",
-        "minimumBodyFontPt", "contentTopInset", "contentBottomInset", "artboardGap",
+        "minimumBodyFontPt", "contentTopInset", "contentBottomInset", "sectionGap", "artboardGap",
     ):
         geometry[key] = _finite_positive(geometry[key], key)
     geometry["panelCount"] = int(geometry.get("panelCount") or 0)
@@ -93,10 +94,10 @@ def _vertical_layout_groups(
     items_by_index: Mapping[int, Mapping[str, Any]],
     *,
     source_half_rect: Sequence[float],
-) -> list[list[int]]:
+) -> tuple[list[list[int]], list[int], int]:
     records = _item_records(item_indexes, items_by_index)
     if not records:
-        return []
+        return [], [], 0
     source_width = float(source_half_rect[2]) - float(source_half_rect[0])
     source_bottom = float(source_half_rect[3])
     footer_indexes = {
@@ -135,25 +136,12 @@ def _vertical_layout_groups(
         if preamble:
             groups.append(preamble)
         groups.extend(bucket for bucket in buckets if bucket)
-    else:
-        ordered = sorted(body_records, key=lambda record: record["bounds"][1], reverse=True)
-        current: list[int] = []
-        current_bottom = 0.0
-        for record in ordered:
-            gap = current_bottom - record["bounds"][1] if current else 0.0
-            if current and gap > 18:
-                groups.append(current)
-                current = []
-            current.append(record["index"])
-            current_bottom = min(current_bottom, record["bounds"][3]) if len(current) > 1 else record["bounds"][3]
-        if current:
-            groups.append(current)
-    if footer_indexes:
-        groups.append(sorted(footer_indexes))
-    return groups
+    elif body_records:
+        groups.append([record["index"] for record in body_records])
+    return groups, sorted(footer_indexes), len(header_records)
 
 
-def _vertical_section_distribution(
+def _vertical_section_compaction(
     item_indexes: Sequence[int],
     items_by_index: Mapping[int, Mapping[str, Any]],
     *,
@@ -164,12 +152,13 @@ def _vertical_section_distribution(
     scale: float,
     content_top_inset: float,
     content_bottom_inset: float,
-) -> tuple[dict[int, float], int, bool]:
+    section_gap: float,
+) -> tuple[dict[int, float], int, bool, bool]:
     records = _item_records(item_indexes, items_by_index)
     if not records:
-        return ({int(item_index): 0.0 for item_index in item_indexes}, 0, False)
+        return ({int(item_index): 0.0 for item_index in item_indexes}, 0, False, False)
     record_lookup = {record["index"]: record for record in records}
-    groups = _vertical_layout_groups(
+    groups, footer_indexes, header_count = _vertical_layout_groups(
         item_indexes, items_by_index, source_half_rect=source_half_rect
     )
     source_top = float(source_half_rect[1])
@@ -184,21 +173,27 @@ def _vertical_section_distribution(
             "height": (group_top - group_bottom) * scale,
         })
     desired_top = target_top - content_top_inset
-    desired_bottom = target_top - panel_height + content_bottom_inset
-    usable_height = desired_top - desired_bottom
-    total_height = sum(metric["height"] for metric in group_metrics)
-    distributed = len(group_metrics) >= 2 and total_height <= usable_height
-    gap = (usable_height - total_height) / (len(group_metrics) - 1) if distributed else 0.0
     cursor_top = desired_top
     shifts: dict[int, float] = {}
     for metric in group_metrics:
         shift = cursor_top - metric["currentTop"]
         for item_index in metric["indexes"]:
             shifts[int(item_index)] = shift
-        cursor_top -= metric["height"] + gap
+        cursor_top -= metric["height"] + section_gap
+    footer_anchored = False
+    if footer_indexes:
+        footer_bounds = [record_lookup[index]["bounds"] for index in footer_indexes]
+        footer_bottom = min(bound[3] for bound in footer_bounds)
+        current_bottom = fit_top - (source_top - footer_bottom) * scale
+        desired_bottom = target_top - panel_height + content_bottom_inset
+        footer_shift = desired_bottom - current_bottom
+        for item_index in footer_indexes:
+            shifts[int(item_index)] = footer_shift
+        footer_anchored = True
     for item_index in item_indexes:
         shifts.setdefault(int(item_index), 0.0)
-    return shifts, len(group_metrics), distributed
+    compacted = header_count >= 2
+    return shifts, len(group_metrics) + (1 if footer_indexes else 0), compacted, footer_anchored
 
 
 def _source_slots(artboard_count: int) -> list[dict[str, Any]]:
@@ -307,6 +302,7 @@ def build_plan(
     panel_height_pt = mm_to_pt(normalized_geometry["panelHeight"])
     content_top_inset_pt = mm_to_pt(normalized_geometry["contentTopInset"])
     content_bottom_inset_pt = mm_to_pt(normalized_geometry["contentBottomInset"])
+    section_gap_pt = mm_to_pt(normalized_geometry["sectionGap"])
     side_gap_pt = mm_to_pt(normalized_geometry["artboardGap"])
     artboard_tops = [-(media_height_pt + side_gap_pt), 0.0]
     items_by_index = {int(item["index"]): item for item in inventory.get("items") or []}
@@ -377,7 +373,7 @@ def build_plan(
             raise FoldedLeafletError(
                 f"Source band contains no native objects: {item['sourceArtboard']}:{item['sourceSide']}:{band_start}-{band_end}"
             )
-        vertical_shifts, layout_group_count, vertical_distribution_expected = _vertical_section_distribution(
+        vertical_shifts, layout_group_count, section_compaction_expected, footer_anchored = _vertical_section_compaction(
             item_indexes,
             items_by_index,
             source_half_rect=source_half_rect,
@@ -387,9 +383,11 @@ def build_plan(
             scale=scale,
             content_top_inset=content_top_inset_pt,
             content_bottom_inset=content_bottom_inset_pt,
+            section_gap=section_gap_pt,
         )
         panel["layoutGroupCount"] = layout_group_count
-        panel["verticalDistributionExpected"] = vertical_distribution_expected
+        panel["sectionCompactionExpected"] = section_compaction_expected
+        panel["footerAnchored"] = footer_anchored
         for item_index in item_indexes:
             movements.append({
                 "itemIndex": int(item_index),
@@ -403,7 +401,8 @@ def build_plan(
                 "scale": scale,
                 "verticalShiftPt": vertical_shifts[item_index],
                 "layoutGroupCount": layout_group_count,
-                "verticalDistributionExpected": vertical_distribution_expected,
+                "sectionCompactionExpected": section_compaction_expected,
+                "footerAnchored": footer_anchored,
             })
     mapped = {item["itemIndex"] for item in movements}
     printable = {
@@ -508,13 +507,13 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
       var checkedMove=moves[checkIndex], checkedItem=top[Number(checkedMove.itemIndex)], visible=checkedItem.visibleBounds, panelRect=checkedMove.targetPanelRect, tolerance=0.75;
       if(Number(visible[0])<Number(panelRect[0])-tolerance||Number(visible[1])>Number(panelRect[1])+tolerance||Number(visible[2])>Number(panelRect[2])+tolerance||Number(visible[3])<Number(panelRect[3])-tolerance) outOfPanel.push(Number(checkedMove.itemIndex));
       var panelKey=String(checkedMove.targetArtboard)+":"+String(checkedMove.targetPanel), metric=panelContent[panelKey];
-      if(!metric) metric=panelContent[panelKey]={{targetArtboard:Number(checkedMove.targetArtboard),targetPanel:Number(checkedMove.targetPanel),panelTop:Number(panelRect[1]),panelBottom:Number(panelRect[3]),contentTop:Number(visible[1]),contentBottom:Number(visible[3]),layoutGroupCount:Number(checkedMove.layoutGroupCount||0),verticalDistributionExpected:Boolean(checkedMove.verticalDistributionExpected)}};
-      else {{ metric.contentTop=Math.max(metric.contentTop,Number(visible[1])); metric.contentBottom=Math.min(metric.contentBottom,Number(visible[3])); metric.layoutGroupCount=Math.max(metric.layoutGroupCount,Number(checkedMove.layoutGroupCount||0)); metric.verticalDistributionExpected=metric.verticalDistributionExpected||Boolean(checkedMove.verticalDistributionExpected); }}
+      if(!metric) metric=panelContent[panelKey]={{targetArtboard:Number(checkedMove.targetArtboard),targetPanel:Number(checkedMove.targetPanel),panelTop:Number(panelRect[1]),panelBottom:Number(panelRect[3]),contentTop:Number(visible[1]),contentBottom:Number(visible[3]),layoutGroupCount:Number(checkedMove.layoutGroupCount||0),sectionCompactionExpected:Boolean(checkedMove.sectionCompactionExpected),footerAnchored:Boolean(checkedMove.footerAnchored)}};
+      else {{ metric.contentTop=Math.max(metric.contentTop,Number(visible[1])); metric.contentBottom=Math.min(metric.contentBottom,Number(visible[3])); metric.layoutGroupCount=Math.max(metric.layoutGroupCount,Number(checkedMove.layoutGroupCount||0)); metric.sectionCompactionExpected=metric.sectionCompactionExpected||Boolean(checkedMove.sectionCompactionExpected); metric.footerAnchored=metric.footerAnchored||Boolean(checkedMove.footerAnchored); }}
     }}
     var metricParts=[];
     for(var metricKey in panelContent) if(panelContent.hasOwnProperty(metricKey)) {{
       var panelMetric=panelContent[metricKey], topBlank=Math.max(0,panelMetric.panelTop-panelMetric.contentTop), bottomBlank=Math.max(0,panelMetric.contentBottom-panelMetric.panelBottom);
-      metricParts.push('{{"targetArtboard":'+panelMetric.targetArtboard+',"targetPanel":'+panelMetric.targetPanel+',"topBlankPt":'+topBlank+',"bottomBlankPt":'+bottomBlank+',"layoutGroupCount":'+panelMetric.layoutGroupCount+',"verticalDistributionExpected":'+(panelMetric.verticalDistributionExpected?'true':'false')+'}}');
+      metricParts.push('{{"targetArtboard":'+panelMetric.targetArtboard+',"targetPanel":'+panelMetric.targetPanel+',"topBlankPt":'+topBlank+',"bottomBlankPt":'+bottomBlank+',"layoutGroupCount":'+panelMetric.layoutGroupCount+',"sectionCompactionExpected":'+(panelMetric.sectionCompactionExpected?'true':'false')+',"footerAnchored":'+(panelMetric.footerAnchored?'true':'false')+'}}');
     }}
 
     var guides=doc.layers.add(); guides.name="FIVE_FOLD_GUIDES"; guides.printable=true; guides.visible=true;
@@ -583,18 +582,6 @@ def validate_qa(qa: Mapping[str, Any], geometry: Mapping[str, Any]) -> list[dict
             "excessive_top_whitespace",
             f"五折页面板标题前留白超过参考阈值：{excessive_top_blank}",
             "请保持整章节内部相对位置不变，并把章节整体顶对齐到参考内容边距",
-        ))
-    excessive_bottom_blank = [
-        f"{int(item.get('targetArtboard', -1))}:{int(item.get('targetPanel', -1))}"
-        for item in qa.get("panelContentMetrics") or []
-        if item.get("verticalDistributionExpected")
-        and float(item.get("bottomBlankPt") or 0) > mm_to_pt(12)
-    ]
-    if excessive_bottom_blank:
-        issues.append(imposition.blocking_issue(
-            "excessive_bottom_whitespace",
-            f"五折页可分布面板底部留白超过参考阈值：{excessive_bottom_blank}",
-            "请保持章节内部间距不变，并将最后一个完整章节或页码对齐到底部参考边距",
         ))
     expected_width = mm_to_pt(geometry["mediaWidth"])
     expected_height = mm_to_pt(geometry["mediaHeight"])
