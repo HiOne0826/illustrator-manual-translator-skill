@@ -10,7 +10,7 @@ The five-fold output is an alternative to AB/A/B booklet imposition. Do not run 
 - Horizontal trim margins: `5 mm` on each side.
 - Vertical trim margins: `9.19 mm` on each side.
 - Finished panel size: `76 × 156.22 mm`.
-- Dense reference panels keep about `5.8 mm` above and `3.7 mm` below live content inside the finished panel.
+- Dense reference panels commonly keep about `5.8 mm` above live content. Bottom whitespace depends on the actual content volume and must not be removed by stretching internal layout.
 - The two Illustrator artboards keep the reference `31 mm` canvas gap; outside is artboard 1 below, inside is artboard 2 above.
 - Replace source A4 guides with ten closed Illustrator guide rectangles (`guides=true`), one exact `76 × 156.22 mm` rectangle per panel.
 - Crop and fold marks are native Illustrator paths inside the media box.
@@ -47,9 +47,9 @@ When the source has fewer logical panels than the target, one source half-page m
 
 ## Native-object layout
 
-The implementation scales source objects uniformly to the panel width, then redistributes their vertical positions into the reference content insets. Object dimensions remain proportional: images and text are not stretched vertically. A half-page whose content occupies less than 40% of its source height is treated as intentionally sparse and remains centered instead of being artificially expanded. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
+The implementation scales source objects uniformly to the panel width, preserves every object's relative position inside its page or semantic band, and moves the complete section by one shared offset to the reference top inset. It never spreads titles and bodies independently to fill panel height. Object dimensions remain proportional: images and text are not stretched vertically. Short sections may retain natural bottom whitespace. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
 
-QA records `panelContentMetrics` and blocks a dense panel when either top or bottom whitespace exceeds `12 mm`. This prevents regression to scaling the complete A4 half-page, including its original margins.
+QA records `panelContentMetrics` and blocks a top-aligned section when whitespace before its first object exceeds `12 mm`. Bottom whitespace alone is not a failure because content volume varies.
 
 This native-fit mode is a technical conversion baseline, not semantic editorial reflow. If the customer requires the dense MC-230 reference style, onboard panel-level semantic rules and edit content until all overset and readability gates pass.
 

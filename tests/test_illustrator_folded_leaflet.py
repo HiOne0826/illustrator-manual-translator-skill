@@ -49,10 +49,9 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertAlmostEqual(geometry["panelWidth"], 76.0)
         self.assertAlmostEqual(geometry["panelHeight"], 156.22)
         self.assertAlmostEqual(geometry["contentTopInset"], 5.8)
-        self.assertAlmostEqual(geometry["contentBottomInset"], 3.7)
         self.assertAlmostEqual(geometry["artboardGap"], 31.0)
 
-    def test_dense_half_page_spreads_positions_to_reference_vertical_insets(self):
+    def test_panel_top_alignment_preserves_internal_object_offsets(self):
         payload = inventory(1)
         half = payload["halves"][0]
         half["itemIndexes"] = [0, 2]
@@ -65,12 +64,11 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         plan = folded.build_plan(payload)
         first = next(item for item in plan["movements"] if item["itemIndex"] == 0)
         last = next(item for item in plan["movements"] if item["itemIndex"] == 2)
-        self.assertTrue(first["verticalFillExpected"])
-        self.assertGreater(first["verticalShiftPt"], 0)
-        self.assertLess(last["verticalShiftPt"], 0)
+        self.assertTrue(first["referenceTopAlignExpected"])
+        self.assertAlmostEqual(first["verticalShiftPt"], last["verticalShiftPt"])
 
-    def test_overlapping_title_and_bar_move_as_one_visual_cluster(self):
-        shifts, eligible = folded._vertical_distribution(
+    def test_every_object_in_a_section_receives_one_shared_vertical_shift(self):
+        shifts, eligible = folded._vertical_alignment(
             [0, 1, 2],
             {
                 0: {"bounds": [0, -20, 200, -60]},
@@ -80,14 +78,12 @@ class FoldedLeafletPlanTests(unittest.TestCase):
             source_half_rect=[0, 0, 420, -595],
             fit_top=-40,
             target_top=-26,
-            panel_height=folded.mm_to_pt(156.22),
             scale=0.5,
             content_top_inset=folded.mm_to_pt(5.8),
-            content_bottom_inset=folded.mm_to_pt(3.7),
         )
         self.assertTrue(eligible)
         self.assertAlmostEqual(shifts[0], shifts[1])
-        self.assertNotEqual(shifts[0], shifts[2])
+        self.assertAlmostEqual(shifts[0], shifts[2])
 
     def test_bundled_reference_plan_is_intentionally_blocked_until_print_direction_confirmation(self):
         plan_path = ROOT / "skills/illustrator-manual-translator/assets/folded-leaflet-plans/five-panel-reference.v1.json"
@@ -173,7 +169,7 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         }, folded.normalize_geometry())
         self.assertEqual({item["type"] for item in issues}, {"editability_lost", "text_overflow", "panel_bounds_violation"})
 
-    def test_qa_blocks_regression_to_large_vertical_whitespace(self):
+    def test_qa_blocks_large_whitespace_before_a_top_aligned_section(self):
         issues = folded.validate_qa({
             "artboardCount": 2,
             "panelCountPerSide": 5,
@@ -183,11 +179,27 @@ class FoldedLeafletPlanTests(unittest.TestCase):
             "guideRectangleCount": 10,
             "artboardGapPt": folded.mm_to_pt(31),
             "panelContentMetrics": [{
-                "targetArtboard": 1, "targetPanel": 2, "verticalFillExpected": True,
+                "targetArtboard": 1, "targetPanel": 2, "referenceTopAlignExpected": True,
                 "topBlankPt": folded.mm_to_pt(24), "bottomBlankPt": folded.mm_to_pt(4),
             }],
         }, folded.normalize_geometry())
-        self.assertEqual([item["type"] for item in issues], ["excessive_vertical_whitespace"])
+        self.assertEqual([item["type"] for item in issues], ["excessive_top_whitespace"])
+
+    def test_qa_allows_natural_bottom_whitespace_for_short_content(self):
+        issues = folded.validate_qa({
+            "artboardCount": 2,
+            "panelCountPerSide": 5,
+            "mediaWidthPt": folded.mm_to_pt(390),
+            "mediaHeightPt": folded.mm_to_pt(174.6),
+            "editableObjectsPreserved": True,
+            "guideRectangleCount": 10,
+            "artboardGapPt": folded.mm_to_pt(31),
+            "panelContentMetrics": [{
+                "targetArtboard": 1, "targetPanel": 2, "referenceTopAlignExpected": True,
+                "topBlankPt": folded.mm_to_pt(5.8), "bottomBlankPt": folded.mm_to_pt(60),
+            }],
+        }, folded.normalize_geometry())
+        self.assertEqual(issues, [])
 
     def test_jsx_uses_native_objects_and_creates_print_marks(self):
         plan = folded.build_plan(inventory())
@@ -197,6 +209,7 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertIn("item.resize", jsx)
         self.assertIn("item.translate", jsx)
         self.assertIn("verticalShiftPt", jsx)
+        self.assertIn("referenceTopAlignExpected", jsx)
         self.assertIn("panelContentMetrics", jsx)
         self.assertIn("FIVE_FOLD_PRINT_MARKS", jsx)
         self.assertIn("FIVE_FOLD_GUIDES", jsx)
