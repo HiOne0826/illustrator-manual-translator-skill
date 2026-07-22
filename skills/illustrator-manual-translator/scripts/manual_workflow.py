@@ -25,7 +25,8 @@ from xml.etree import ElementTree as ET
 SCHEMA = "illustrator-manual-project/1.0"
 WORKBOOK_NAME = "说明书内容确认.xlsx"
 IMPOSITION_QA_CONTRACT_VERSION = 2
-FOLDED_LEAFLET_QA_CONTRACT_VERSION = 1
+FOLDED_LEAFLET_QA_CONTRACT_VERSION = 5
+SMALL_FORMAT_QA_CONTRACT_VERSION = 1
 REVIEW_META_PATTERN = re.compile(
     r"(?:请(?:客户)?确认|待确认|需要确认|需确认|please\s+confirm|needs?\s+confirmation|\bTODO\b|\bTBD\b)",
     re.IGNORECASE,
@@ -199,6 +200,21 @@ def folded_leaflet_import() -> Any:
     spec = importlib.util.spec_from_file_location("manual_skill_illustrator_folded_leaflet", local_module)
     if not spec or not spec.loader:
         raise WorkflowError("无法加载 Illustrator 五折页模块")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def small_format_import() -> Any:
+    local_module = Path(__file__).with_name("illustrator_small_format.py")
+    if not local_module.is_file():
+        raise WorkflowError("缺少小版面自动分页模块 illustrator_small_format.py")
+    script_root = str(local_module.parent)
+    if script_root not in sys.path:
+        sys.path.insert(0, script_root)
+    spec = importlib.util.spec_from_file_location("manual_skill_illustrator_small_format", local_module)
+    if not spec or not spec.loader:
+        raise WorkflowError("无法加载 Illustrator 小版面自动分页模块")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -659,7 +675,8 @@ def invalidate_downstream_state(state: dict[str, Any]) -> None:
         "electronicConfirmedAt", "electronicManifestPath",
         "abImpositionResultsPath", "abConfirmedAt", "confirmedAbManifestPath",
         "splitResultsPath", "aBConfirmedAt", "confirmedABSplitManifestPath", "impositionManifestPath",
-        "foldedLeafletResultsPath", "foldedLeafletConfirmedAt", "foldedLeafletManifestPath", "printVariant",
+        "foldedLeafletResultsPath", "foldedLeafletConfirmedAt", "foldedLeafletManifestPath",
+        "smallFormatResultsPath", "smallFormatConfirmedAt", "smallFormatManifestPath", "printVariant",
         "deliveryPackageGenerated", "deliveredAt", "deliveryManifestPath",
     ):
         state.pop(key, None)
@@ -676,6 +693,7 @@ def command_refresh_chinese(args: argparse.Namespace) -> None:
         "ready_to_render", "waiting_layout_confirmation", "blocked",
         "ready_to_impose_ab", "blocked_ab_imposition", "waiting_ab_confirmation",
         "blocked_folded_leaflet", "waiting_folded_leaflet_confirmation",
+        "blocked_small_format", "waiting_small_format_confirmation",
         "ready_to_split_ab", "blocked_a_b_split", "waiting_a_b_confirmation", "completed_without_delivery", "delivered",
     )
     ensure_input_hashes(project, state)
@@ -1675,6 +1693,117 @@ def current_folded_leaflet_runtime_sha256() -> str:
     return sha256(SKILL_ROOT / "scripts" / "illustrator_folded_leaflet.py")
 
 
+def current_small_format_runtime_sha256() -> str:
+    return sha256(SKILL_ROOT / "scripts" / "illustrator_small_format.py")
+
+
+def _verified_small_format_artifacts(result: dict[str, Any], allowed_root: Path) -> list[dict[str, Any]]:
+    if int(result.get("qaContractVersion") or 0) != SMALL_FORMAT_QA_CONTRACT_VERSION:
+        raise WorkflowError("小版面结果使用旧 QA 契约；请用当前 Skill 重新生成")
+    if str(result.get("runtimeSha256") or "") != current_small_format_runtime_sha256():
+        raise WorkflowError("小版面结果由不同版本脚本生成；请用当前 Skill 重新生成")
+    artifacts = list(result.get("artifacts") or [])
+    available = {str(item.get("type") or "") for item in artifacts}
+    required = {"ai", "pdf", "imposition_qa", "small_format_manifest", "page_png"}
+    missing = sorted(required - available)
+    if missing:
+        raise WorkflowError(f"{result.get('language')} 缺少小版面产物：{', '.join(missing)}")
+    verified = []
+    for item in artifacts:
+        source = Path(str(item.get("path") or "")).resolve()
+        if not source.is_file() or not source.is_relative_to(allowed_root.resolve()):
+            raise WorkflowError(f"小版面产物不在受控 preview 目录：{source}")
+        if not item.get("sha256") or sha256(source) != item["sha256"]:
+            raise WorkflowError(f"小版面产物在确认后发生变化：{source.name}")
+        if item.get("type") == "imposition_qa":
+            qa = read_json(source)
+            if qa.get("schema") != "illustrator-small-format/1.0" or int(qa.get("qaContractVersion") or 0) != SMALL_FORMAT_QA_CONTRACT_VERSION:
+                raise WorkflowError("小版面 QA 文件不符合当前契约")
+            if not qa.get("editableObjectsPreserved"):
+                raise WorkflowError("小版面 QA 未证明可编辑对象得到保留")
+        verified.append({**item, "path": str(source)})
+    return verified
+
+
+def command_layout_small_format(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "ready_to_impose_ab", "blocked_small_format", "waiting_small_format_confirmation")
+    ensure_input_hashes(project, state)
+    sources = electronic_sources(project, state)
+    small_format = small_format_import()
+    plan = read_json(Path(args.plan).expanduser().resolve()) if args.plan else {}
+    results, blocking = [], []
+    for language in expected_languages(state):
+        output_dir = project / "preview" / language / "small-format"
+        result = small_format.layout_small_format_job({
+            "language": language,
+            "sourceAI": str(sources[language]["ai"]),
+            "sourcePDF": str(sources[language]["pdf"]),
+            "outputDir": str(output_dir),
+            "outputName": f"manual-{language}-小版面",
+            "plan": plan,
+        }, execute=not args.no_execute)
+        results.append({"language": language, **result})
+        blocking.extend({"language": language, **issue} for issue in result.get("qualityIssues") or [] if issue.get("level") == "blocking")
+    output = project / "work" / "small-format-results.json"
+    write_json(output, {"results": results, "blocking": blocking, "plan": plan})
+    state["smallFormatResultsPath"] = relative(project, output)
+    state["blockingIssues"] = blocking
+    state["blockingPhase"] = "small_format" if blocking else None
+    state["printVariant"] = "small-format"
+    state["stage"] = "ready_to_impose_ab" if args.no_execute else ("blocked_small_format" if blocking else "waiting_small_format_confirmation")
+    save_state(project, state)
+    print(json.dumps({
+        "stage": state["stage"], "results": str(output), "blockingIssues": blocking,
+        "message": "请逐语种确认自动分页的小版面 AI/PDF，确认后运行 confirm-small-format" if not blocking and not args.no_execute else "请按 userAction 修复小版面阻塞问题后重试",
+    }, ensure_ascii=False, indent=2))
+
+
+def command_confirm_small_format(args: argparse.Namespace) -> None:
+    project = project_path(args.project)
+    state = load_state(project)
+    require_stage(state, "waiting_small_format_confirmation")
+    ensure_input_hashes(project, state)
+    results = read_json(project / state["smallFormatResultsPath"]).get("results") or []
+    if [item.get("language") for item in results] != expected_languages(state):
+        raise WorkflowError("小版面结果语种集不完整或顺序不一致")
+    copied: list[dict[str, Any]] = []
+    page_counts: dict[str, int] = {}
+    for result in results:
+        language = str(result["language"])
+        if result.get("status") != "succeeded" or result.get("qualityIssues"):
+            raise WorkflowError(f"{language} 小版面尚未通过自动校验")
+        root = project / "preview" / language / "small-format"
+        artifacts = _verified_small_format_artifacts(result, root)
+        manifest = read_json(Path(result["manifest"]).resolve())
+        page_counts[language] = int(manifest.get("pageCount") or 0)
+        for artifact in artifacts:
+            source = Path(artifact["path"])
+            target = project / "delivery" / language / "SMALL_FORMAT" / source.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied.append({
+                "language": language, "variant": "SMALL_FORMAT", "type": artifact["type"],
+                "path": relative(project, target), "sha256": sha256(target),
+            })
+    files = list(read_json(project / state["electronicManifestPath"]).get("files") or [])
+    files.extend(copied)
+    small_manifest = project / "delivery" / "small-format-manifest.json"
+    write_json(small_manifest, {"projectSchema": SCHEMA, "confirmedAt": now(), "files": copied, "pageCounts": page_counts})
+    delivery_manifest = project / "delivery" / "delivery-manifest.json"
+    write_json(delivery_manifest, {"projectSchema": SCHEMA, "deliveredAt": now(), "files": files})
+    state["stage"] = "delivered"
+    state["smallFormatConfirmedAt"] = now()
+    state["smallFormatManifestPath"] = relative(project, small_manifest)
+    state["deliveryManifestPath"] = relative(project, delivery_manifest)
+    state["deliveryPackageGenerated"] = True
+    state["blockingIssues"] = []
+    state.pop("blockingPhase", None)
+    save_state(project, state)
+    print(json.dumps({"stage": state["stage"], "delivery": str(project / "delivery"), "manifest": str(delivery_manifest)}, ensure_ascii=False, indent=2))
+
+
 def validate_folded_leaflet_result_contract(result: dict[str, Any]) -> None:
     if int(result.get("qaContractVersion") or 0) != FOLDED_LEAFLET_QA_CONTRACT_VERSION:
         raise WorkflowError("五折页结果使用旧 QA 契约；请用当前 Skill 重新生成")
@@ -1962,7 +2091,9 @@ def command_status(args: argparse.Namespace) -> None:
         "ready_to_render": "运行 render",
         "waiting_layout_confirmation": "等待用户查看预览 PDF 并明确确认版式",
         "blocked": "处理阻塞问题后重新 render",
-        "ready_to_impose_ab": "小册子运行 impose-ab；五折页运行 impose-five-fold --plan <json>",
+        "ready_to_impose_ab": "小版面运行 layout-small-format；小册子运行 impose-ab；需要时再选择五折拼版",
+        "blocked_small_format": "按 blockingIssues.userAction 修复后重新运行 layout-small-format",
+        "waiting_small_format_confirmation": "等待用户确认全部语种小版面，然后运行 confirm-small-format",
         "blocked_folded_leaflet": "按 blockingIssues.userAction 修复后重新运行 impose-five-fold",
         "waiting_folded_leaflet_confirmation": "等待用户确认全部语种五折页，然后运行 confirm-five-fold",
         "blocked_ab_imposition": "按 blockingIssues.userAction 修复电子版后重新运行 impose-ab",
@@ -1981,6 +2112,7 @@ def command_doctor(args: argparse.Namespace) -> None:
     del extract_sources
     imposition = imposition_import()
     folded_leaflet = folded_leaflet_import()
+    small_format = small_format_import()
     pdftoppm = shutil.which("pdftoppm")
     if not pdftoppm:
         raise WorkflowError("缺少 pdftoppm；无法生成正式逐页 PDF 校对图")
@@ -1996,6 +2128,7 @@ def command_doctor(args: argparse.Namespace) -> None:
         "illustratorWorker": report,
         "impositionSchema": imposition.SCHEMA,
         "foldedLeafletSchema": folded_leaflet.SCHEMA,
+        "smallFormatSchema": small_format.SCHEMA,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if not payload["ok"]:
@@ -2052,6 +2185,12 @@ def build_parser() -> argparse.ArgumentParser:
     impose = sub.add_parser("impose-ab", help="为中文和全部目标语种生成可编辑 AB AI/PDF")
     impose.add_argument("--project", required=True)
     impose.add_argument("--no-execute", action="store_true")
+    layout_small = sub.add_parser("layout-small-format", help="按内容容量生成可变页数的小版面 AI/PDF")
+    layout_small.add_argument("--project", required=True)
+    layout_small.add_argument("--plan", help="可选的小版面尺寸和间距 JSON")
+    layout_small.add_argument("--no-execute", action="store_true")
+    confirm_small = sub.add_parser("confirm-small-format", help="确认全部语种小版面并生成交付包")
+    confirm_small.add_argument("--project", required=True)
     impose_five_fold = sub.add_parser("impose-five-fold", help="将电子版原生对象排入双面五折页 AI/PDF")
     impose_five_fold.add_argument("--project", required=True)
     impose_five_fold.add_argument("--plan", help="五折页面板映射、几何和正反面翻转合同 JSON")
@@ -2091,6 +2230,8 @@ def main() -> int:
         "confirm-source-chinese-layout": command_confirm_source_chinese_layout,
         "confirm-layout": command_confirm_layout,
         "impose-ab": command_impose_ab,
+        "layout-small-format": command_layout_small_format,
+        "confirm-small-format": command_confirm_small_format,
         "impose-five-fold": command_impose_five_fold,
         "confirm-five-fold": command_confirm_five_fold,
         "confirm-ab": command_confirm_ab,

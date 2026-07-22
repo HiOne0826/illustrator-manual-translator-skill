@@ -142,10 +142,27 @@ This freezes the Chinese and every target-language electronic AI/PDF. It does no
 
 At this point choose one print path for the project:
 
+- Small-format manual: continue with `layout-small-format` and `confirm-small-format`; page count is automatic.
 - Booklet: continue with `impose-ab`, `confirm-ab`, `split-a-b`, and `confirm-a-b`.
-- Five-fold leaflet: provide an explicit ten-panel plan and continue with `impose-five-fold` and `confirm-five-fold`.
+- Five-fold leaflet: only when separately requested, provide an explicit imposition plan and continue with `impose-five-fold` and `confirm-five-fold`.
 
-## 5A. Generate And Confirm Five-Fold Leaflets
+## 5A. Generate And Confirm Variable Small Pages
+
+Read `references/small-format.md` first.
+
+```bash
+python3 scripts/manual_workflow.py layout-small-format \
+  --project "/path/to/customer-project"
+```
+
+The module writes native editable AI/PDF, one preview PNG per generated `76 × 156.22 mm` page, a small-format manifest, and QA for every language. It derives page count from content capacity, keeps fitting sections together, and may merge adjacent sparse footer-free source halves. Stop until the user explicitly confirms all small pages.
+
+```bash
+python3 scripts/manual_workflow.py confirm-small-format \
+  --project "/path/to/customer-project"
+```
+
+## 5B. Generate And Confirm Five-Fold Leaflets
 
 Read `references/folded-leaflet.md` first. The plan must map every electronic half-page exactly once into the ten outside/inside panels and must confirm the printer's duplex flip direction.
 

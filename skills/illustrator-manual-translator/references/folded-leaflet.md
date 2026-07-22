@@ -1,6 +1,6 @@
 # Five-Fold Leaflet Contract
 
-The five-fold output is an alternative to AB/A/B booklet imposition. Do not run both paths for one confirmed electronic edition unless the customer explicitly requests both deliverables.
+Five-fold is an optional printer-sheet imposition, not the small-format content-pagination model. Establish and confirm the variable small-page layout first when page count is content-driven. Use this five-fold path only when the customer or printer separately requires a two-sided five-panel sheet.
 
 ## Fixed geometry
 

@@ -119,7 +119,23 @@ class ImpositionWorkflowGateTests(unittest.TestCase):
     def test_five_fold_runtime_is_bundled_and_versioned(self) -> None:
         module = workflow.folded_leaflet_import()
         self.assertEqual(module.SCHEMA, "illustrator-folded-leaflet/1.0")
+        self.assertEqual(workflow.FOLDED_LEAFLET_QA_CONTRACT_VERSION, module.QA_CONTRACT_VERSION)
         self.assertEqual(workflow.current_folded_leaflet_runtime_sha256(), workflow.sha256(Path(module.__file__)))
+
+    def test_small_format_commands_use_variable_page_layout_path(self) -> None:
+        args = workflow.build_parser().parse_args([
+            "layout-small-format", "--project", "/tmp/example", "--no-execute",
+        ])
+        self.assertEqual(args.command, "layout-small-format")
+        self.assertTrue(args.no_execute)
+        confirm = workflow.build_parser().parse_args(["confirm-small-format", "--project", "/tmp/example"])
+        self.assertEqual(confirm.command, "confirm-small-format")
+
+    def test_small_format_runtime_is_bundled_and_versioned(self) -> None:
+        module = workflow.small_format_import()
+        self.assertEqual(module.SCHEMA, "illustrator-small-format/1.0")
+        self.assertEqual(workflow.SMALL_FORMAT_QA_CONTRACT_VERSION, module.QA_CONTRACT_VERSION)
+        self.assertEqual(workflow.current_small_format_runtime_sha256(), workflow.sha256(Path(module.__file__)))
 
     def test_bundled_product_slots_keep_template_when_empty(self) -> None:
         profile = json.loads((ROOT / "skills/illustrator-manual-translator/assets/template-profiles/aeolus-ft802led/layout-rules.v1.json").read_text(encoding="utf-8"))
