@@ -27,7 +27,11 @@ def inventory(artboard_count=4):
         boards.append({"index": artboard, "name": f"page-{artboard + 1}", "rect": [0, top, width, top - height]})
         for side in ("left", "right"):
             halves.append({"artboardIndex": artboard, "side": side, "itemIndexes": [item_index], "pageNumbers": []})
-            items.append({"index": item_index, "name": f"item-{item_index}", "typename": "GroupItem"})
+            half_left = 0 if side == "left" else width / 2
+            items.append({
+                "index": item_index, "name": f"item-{item_index}", "typename": "GroupItem",
+                "bounds": [half_left + 10, top - 20, half_left + 180, top - 80],
+            })
             item_index += 1
     return {
         "artboardCount": artboard_count,
@@ -46,6 +50,7 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertAlmostEqual(geometry["panelHeight"], 156.22)
         self.assertAlmostEqual(geometry["contentTopInset"], 5.8)
         self.assertAlmostEqual(geometry["contentBottomInset"], 3.7)
+        self.assertAlmostEqual(geometry["artboardGap"], 31.0)
 
     def test_dense_half_page_spreads_positions_to_reference_vertical_insets(self):
         payload = inventory(1)
@@ -87,8 +92,20 @@ class FoldedLeafletPlanTests(unittest.TestCase):
     def test_bundled_reference_plan_is_intentionally_blocked_until_print_direction_confirmation(self):
         plan_path = ROOT / "skills/illustrator-manual-translator/assets/folded-leaflet-plans/five-panel-reference.v1.json"
         payload = json.loads(plan_path.read_text(encoding="utf-8"))
+        payload_inventory = inventory()
+        for half_index, new_index in ((3, 8), (7, 9)):
+            half = payload_inventory["halves"][half_index]
+            existing = payload_inventory["items"][half["itemIndexes"][0]]
+            board = payload_inventory["artboards"][half["artboardIndex"]]
+            existing["bounds"][1] = board["rect"][1] - 20
+            existing["bounds"][3] = board["rect"][1] - 120
+            payload_inventory["items"].append({
+                "index": new_index, "name": f"item-{new_index}", "typename": "GroupItem",
+                "bounds": [existing["bounds"][0], board["rect"][1] - 400, existing["bounds"][2], board["rect"][1] - 520],
+            })
+            half["itemIndexes"].append(new_index)
         plan = folded.build_plan(
-            inventory(),
+            payload_inventory,
             geometry=payload["geometry"],
             assignments=payload["assignments"],
             print_profile=payload["printProfile"],
@@ -104,13 +121,39 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertEqual({item["itemIndex"] for item in plan["movements"]}, set(range(8)))
         self.assertAlmostEqual(plan["mediaSizePt"][0], folded.mm_to_pt(390), places=5)
         self.assertAlmostEqual(plan["minimumScale"], folded.mm_to_pt(76) / (841.89 / 2), places=4)
+        self.assertEqual(plan["artboardTops"], [-(folded.mm_to_pt(174.6) + folded.mm_to_pt(31)), 0.0])
+
+    def test_source_a4_guides_are_replaced_by_reference_panel_guides(self):
+        payload = inventory()
+        payload["items"].append({
+            "index": 8, "name": "old-center-guide", "typename": "PathItem",
+            "details": {"guides": True},
+        })
+        payload["preservedItemIndexes"] = [8]
+        plan = folded.build_plan(payload)
+        self.assertEqual(plan["replaceGuideItemIndexes"], [8])
+        self.assertEqual(plan["preserveItemIndexes"], [])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            jsx = folded.build_layout_jsx(root / "source.ai", root / "out.ai", root / "out.pdf", root / "qa.json", plan)
+        self.assertIn("FIVE_FOLD_GUIDES", jsx)
+        self.assertIn("item.guides=true", jsx)
+        self.assertIn("replaceGuides", jsx)
 
     def test_plan_rejects_duplicate_source_half(self):
         assignments = folded.default_assignments(4)
-        assignments[1]["sourceArtboard"] = assignments[0]["sourceArtboard"]
-        assignments[1]["sourceSide"] = assignments[0]["sourceSide"]
-        with self.assertRaisesRegex(folded.FoldedLeafletError, "assigned more than once"):
+        assignments[8]["sourceArtboard"] = assignments[0]["sourceArtboard"]
+        assignments[8]["sourceSide"] = assignments[0]["sourceSide"]
+        with self.assertRaisesRegex(folded.FoldedLeafletError, "overlap or leave a gap"):
             folded.build_plan(inventory(), assignments=assignments)
+
+    def test_plan_accepts_non_overlapping_semantic_bands_that_cover_a_source_half(self):
+        assignments = folded.default_assignments(4)
+        assignments[0]["sourceBand"] = [0.0, 0.5]
+        assignments[8].update({"sourceArtboard": 0, "sourceSide": "left", "sourceBand": [0.5, 1.0]})
+        normalized = folded.normalize_assignments(assignments, 4)
+        bands = [item["sourceBand"] for item in normalized if item.get("sourceArtboard") == 0 and item.get("sourceSide") == "left"]
+        self.assertEqual(bands, [[0.0, 0.5], [0.5, 1.0]])
 
     def test_plan_rejects_more_than_ten_source_halves(self):
         with self.assertRaisesRegex(folded.FoldedLeafletError, "only 10 panels"):
@@ -123,6 +166,8 @@ class FoldedLeafletPlanTests(unittest.TestCase):
             "mediaWidthPt": folded.mm_to_pt(390),
             "mediaHeightPt": folded.mm_to_pt(174.6),
             "editableObjectsPreserved": False,
+            "guideRectangleCount": 10,
+            "artboardGapPt": folded.mm_to_pt(31),
             "oversetTextFrameIndexes": [3],
             "outOfPanelItemIndexes": [7],
         }, folded.normalize_geometry())
@@ -135,6 +180,8 @@ class FoldedLeafletPlanTests(unittest.TestCase):
             "mediaWidthPt": folded.mm_to_pt(390),
             "mediaHeightPt": folded.mm_to_pt(174.6),
             "editableObjectsPreserved": True,
+            "guideRectangleCount": 10,
+            "artboardGapPt": folded.mm_to_pt(31),
             "panelContentMetrics": [{
                 "targetArtboard": 1, "targetPanel": 2, "verticalFillExpected": True,
                 "topBlankPt": folded.mm_to_pt(24), "bottomBlankPt": folded.mm_to_pt(4),
@@ -152,6 +199,8 @@ class FoldedLeafletPlanTests(unittest.TestCase):
         self.assertIn("verticalShiftPt", jsx)
         self.assertIn("panelContentMetrics", jsx)
         self.assertIn("FIVE_FOLD_PRINT_MARKS", jsx)
+        self.assertIn("FIVE_FOLD_GUIDES", jsx)
+        self.assertIn("guideRectangleCount", jsx)
         self.assertIn("pdfOptions.preserveEditability=true", jsx)
         self.assertNotIn("placedItems.add", jsx)
         self.assertNotIn("rasterize", jsx.lower())

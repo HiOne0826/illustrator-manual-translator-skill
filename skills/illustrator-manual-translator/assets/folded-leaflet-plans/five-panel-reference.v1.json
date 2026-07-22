@@ -10,7 +10,8 @@
     "panelCount": 5,
     "minimumBodyFontPt": 5.0,
     "contentTopInset": 5.8,
-    "contentBottomInset": 3.7
+    "contentBottomInset": 3.7,
+    "artboardGap": 31.0
   },
   "printProfile": {
     "duplexFlip": "unconfirmed"
@@ -19,12 +20,12 @@
     {"targetSide": "outside", "targetPanel": 0, "sourceArtboard": 0, "sourceSide": "left"},
     {"targetSide": "outside", "targetPanel": 1, "sourceArtboard": 0, "sourceSide": "right"},
     {"targetSide": "outside", "targetPanel": 2, "sourceArtboard": 1, "sourceSide": "left"},
-    {"targetSide": "outside", "targetPanel": 3, "sourceArtboard": 1, "sourceSide": "right"},
-    {"targetSide": "outside", "targetPanel": 4},
+    {"targetSide": "outside", "targetPanel": 3, "sourceArtboard": 1, "sourceSide": "right", "sourceBand": [0.0, 0.54]},
+    {"targetSide": "outside", "targetPanel": 4, "sourceArtboard": 1, "sourceSide": "right", "sourceBand": [0.54, 1.0]},
     {"targetSide": "inside", "targetPanel": 0, "sourceArtboard": 2, "sourceSide": "left"},
     {"targetSide": "inside", "targetPanel": 1, "sourceArtboard": 2, "sourceSide": "right"},
     {"targetSide": "inside", "targetPanel": 2, "sourceArtboard": 3, "sourceSide": "left"},
-    {"targetSide": "inside", "targetPanel": 3, "sourceArtboard": 3, "sourceSide": "right"},
-    {"targetSide": "inside", "targetPanel": 4}
+    {"targetSide": "inside", "targetPanel": 3, "sourceArtboard": 3, "sourceSide": "right", "sourceBand": [0.0, 0.25]},
+    {"targetSide": "inside", "targetPanel": 4, "sourceArtboard": 3, "sourceSide": "right", "sourceBand": [0.25, 1.0]}
   ]
 }

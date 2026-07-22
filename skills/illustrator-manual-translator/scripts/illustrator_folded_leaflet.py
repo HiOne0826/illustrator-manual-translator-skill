@@ -13,7 +13,7 @@ import illustrator_worker
 
 SCHEMA = "illustrator-folded-leaflet/1.0"
 PLAN_SCHEMA = "folded-leaflet-plan/1.0"
-QA_CONTRACT_VERSION = 1
+QA_CONTRACT_VERSION = 2
 SIDE_NAMES = ("outside", "inside")
 DEFAULT_GEOMETRY_MM = {
     "mediaWidth": 390.0,
@@ -26,6 +26,7 @@ DEFAULT_GEOMETRY_MM = {
     "minimumBodyFontPt": 5.0,
     "contentTopInset": 5.8,
     "contentBottomInset": 3.7,
+    "artboardGap": 31.0,
 }
 
 
@@ -48,7 +49,7 @@ def normalize_geometry(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
     geometry = {**DEFAULT_GEOMETRY_MM, **dict(raw or {})}
     for key in (
         "mediaWidth", "mediaHeight", "trimLeft", "trimRight", "trimTop", "trimBottom",
-        "minimumBodyFontPt", "contentTopInset", "contentBottomInset",
+        "minimumBodyFontPt", "contentTopInset", "contentBottomInset", "artboardGap",
     ):
         geometry[key] = _finite_positive(geometry[key], key)
     geometry["panelCount"] = int(geometry.get("panelCount") or 0)
@@ -170,7 +171,7 @@ def normalize_assignments(raw: Sequence[Mapping[str, Any]] | None, artboard_coun
     if len(assignments) != 10:
         raise FoldedLeafletError("Five-fold plan must define exactly 10 target panels")
     targets: set[tuple[str, int]] = set()
-    sources: set[tuple[int, str]] = set()
+    source_bands: dict[tuple[int, str], list[tuple[float, float]]] = {}
     normalized: list[dict[str, Any]] = []
     for item in assignments:
         side = str(item.get("targetSide") or "")
@@ -187,19 +188,37 @@ def normalize_assignments(raw: Sequence[Mapping[str, Any]] | None, artboard_coun
             source_side = str(item.get("sourceSide") or "")
             if source_artboard not in range(artboard_count) or source_side not in ("left", "right"):
                 raise FoldedLeafletError(f"Invalid source half-page: {source_artboard}:{source_side}")
+            raw_band = item.get("sourceBand") or [0.0, 1.0]
+            if not isinstance(raw_band, Sequence) or isinstance(raw_band, (str, bytes)) or len(raw_band) != 2:
+                raise FoldedLeafletError("sourceBand must contain normalized start/end values")
+            band = (float(raw_band[0]), float(raw_band[1]))
+            if not all(math.isfinite(value) for value in band) or band[0] < 0 or band[1] > 1 or band[0] >= band[1]:
+                raise FoldedLeafletError("sourceBand must satisfy 0 <= start < end <= 1")
             source_key = (source_artboard, source_side)
-            if source_key in sources:
-                raise FoldedLeafletError(f"Source half-page assigned more than once: {source_artboard}:{source_side}")
-            sources.add(source_key)
-            result.update({"sourceArtboard": source_artboard, "sourceSide": source_side, "blank": False})
+            source_bands.setdefault(source_key, []).append(band)
+            result.update({
+                "sourceArtboard": source_artboard,
+                "sourceSide": source_side,
+                "sourceBand": [band[0], band[1]],
+                "blank": False,
+            })
         normalized.append(result)
     expected_targets = {(side, panel) for side in SIDE_NAMES for panel in range(5)}
     if targets != expected_targets:
         raise FoldedLeafletError("Target panels must cover outside/inside panels 0 through 4 exactly once")
     expected_sources = {(item["sourceArtboard"], item["sourceSide"]) for item in _source_slots(artboard_count)}
-    if sources != expected_sources:
-        missing = sorted(expected_sources - sources)
+    if set(source_bands) != expected_sources:
+        missing = sorted(expected_sources - set(source_bands))
         raise FoldedLeafletError(f"Every source half-page must be assigned exactly once; missing: {missing}")
+    for source_key, bands in source_bands.items():
+        ordered = sorted(bands)
+        cursor = 0.0
+        for start, end in ordered:
+            if abs(start - cursor) > 0.000001:
+                raise FoldedLeafletError(f"Source half-page bands overlap or leave a gap: {source_key}")
+            cursor = end
+        if abs(cursor - 1.0) > 0.000001:
+            raise FoldedLeafletError(f"Source half-page bands must cover 0 through 1: {source_key}")
     return sorted(normalized, key=lambda item: (SIDE_NAMES.index(item["targetSide"]), item["targetPanel"]))
 
 
@@ -227,13 +246,14 @@ def build_plan(
     panel_height_pt = mm_to_pt(normalized_geometry["panelHeight"])
     content_top_inset_pt = mm_to_pt(normalized_geometry["contentTopInset"])
     content_bottom_inset_pt = mm_to_pt(normalized_geometry["contentBottomInset"])
-    side_gap_pt = 36.0
+    side_gap_pt = mm_to_pt(normalized_geometry["artboardGap"])
+    artboard_tops = [-(media_height_pt + side_gap_pt), 0.0]
     items_by_index = {int(item["index"]): item for item in inventory.get("items") or []}
     movements: list[dict[str, Any]] = []
     panels: list[dict[str, Any]] = []
     for item in normalized_assignments:
         side_index = SIDE_NAMES.index(item["targetSide"])
-        board_top = -side_index * (media_height_pt + side_gap_pt)
+        board_top = artboard_tops[side_index]
         target_left = trim_left_pt + item["targetPanel"] * panel_width_pt
         target_top = board_top - trim_top_pt
         panel = {
@@ -248,11 +268,19 @@ def build_plan(
         source_board = board_lookup[item["sourceArtboard"]]
         source_rect = [float(value) for value in source_board["rect"]]
         source_mid = (source_rect[0] + source_rect[2]) / 2.0
-        source_half_rect = [
+        source_full_half_rect = [
             source_mid if item["sourceSide"] == "right" else source_rect[0],
             source_rect[1],
             source_rect[2] if item["sourceSide"] == "right" else source_mid,
             source_rect[3],
+        ]
+        band_start, band_end = [float(value) for value in item.get("sourceBand") or [0.0, 1.0]]
+        full_source_height = source_full_half_rect[1] - source_full_half_rect[3]
+        source_half_rect = [
+            source_full_half_rect[0],
+            source_full_half_rect[1] - full_source_height * band_start,
+            source_full_half_rect[2],
+            source_full_half_rect[1] - full_source_height * band_end,
         ]
         source_width = source_half_rect[2] - source_half_rect[0]
         source_height = source_half_rect[1] - source_half_rect[3]
@@ -261,7 +289,33 @@ def build_plan(
         fitted_height = source_height * scale
         fit_left = target_left + (panel_width_pt - fitted_width) / 2.0
         fit_top = target_top - (panel_height_pt - fitted_height) / 2.0
-        item_indexes = [int(value) for value in half.get("itemIndexes") or []]
+        item_indexes: list[int] = []
+        for raw_index in half.get("itemIndexes") or []:
+            item_index = int(raw_index)
+            if band_start <= 0 and band_end >= 1:
+                item_indexes.append(item_index)
+                continue
+            raw_bounds = items_by_index.get(item_index, {}).get("bounds")
+            if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
+                raise FoldedLeafletError(f"Split source band requires object bounds: {item_index}")
+            bounds = [float(value) for value in raw_bounds]
+            for boundary in (band_start, band_end):
+                if boundary <= 0 or boundary >= 1:
+                    continue
+                boundary_y = source_full_half_rect[1] - full_source_height * boundary
+                if bounds[1] > boundary_y + 0.75 and bounds[3] < boundary_y - 0.75:
+                    raise FoldedLeafletError(
+                        f"Source object crosses semantic band boundary: item {item_index} at {boundary}"
+                    )
+            center_ratio = (source_full_half_rect[1] - (bounds[1] + bounds[3]) / 2.0) / full_source_height
+            if center_ratio >= band_start - 0.000001 and (
+                center_ratio < band_end - 0.000001 or abs(band_end - 1.0) <= 0.000001
+            ):
+                item_indexes.append(item_index)
+        if not item_indexes:
+            raise FoldedLeafletError(
+                f"Source band contains no native objects: {item['sourceArtboard']}:{item['sourceSide']}:{band_start}-{band_end}"
+            )
         vertical_shifts, vertical_fill_expected = _vertical_distribution(
             item_indexes,
             items_by_index,
@@ -300,14 +354,22 @@ def build_plan(
     duplex_flip = str(raw_print_profile.get("duplexFlip") or "unconfirmed")
     if duplex_flip not in ("unconfirmed", "long-edge", "short-edge"):
         raise FoldedLeafletError("duplexFlip must be long-edge, short-edge, or unconfirmed")
+    source_guide_indexes = [
+        int(item["index"])
+        for item in inventory.get("items") or []
+        if bool((item.get("details") or {}).get("guides"))
+    ]
+    preserved_indexes = [int(value) for value in inventory.get("preservedItemIndexes") or []]
     return {
         "schema": PLAN_SCHEMA,
         "geometryMm": normalized_geometry,
         "mediaSizePt": [media_width_pt, media_height_pt],
         "sideGapPt": side_gap_pt,
+        "artboardTops": artboard_tops,
         "panels": panels,
         "movements": movements,
-        "preserveItemIndexes": [int(value) for value in inventory.get("preservedItemIndexes") or []],
+        "preserveItemIndexes": [value for value in preserved_indexes if value not in source_guide_indexes],
+        "replaceGuideItemIndexes": source_guide_indexes,
         "sourceArtboardCount": artboard_count,
         "minimumScale": min((item["scale"] for item in movements), default=1.0),
         "printProfile": {
@@ -339,12 +401,13 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
   function topItems(doc) {{ var out=[]; for(var i=0;i<doc.pageItems.length;i++) {{ var item=doc.pageItems[i]; try {{ if(item.parent&&item.parent.typename==="Layer") out.push(item); }} catch(e) {{}} }} return out; }}
   function unlockParents(item) {{ var current=item; while(current&&current.typename!=="Document") {{ try {{ current.locked=false; }} catch(e) {{}} try {{ current.visible=true; }} catch(e2) {{}} current=current.parent; }} }}
   function line(layer,x1,y1,x2,y2) {{ var item=layer.pathItems.add(); item.setEntirePath([[x1,y1],[x2,y2]]); item.stroked=true; item.filled=false; item.strokeWidth=0.25; item.strokeColor=markColor; return item; }}
+  function guideRect(layer,left,top,right,bottom) {{ var item=layer.pathItems.add(); item.setEntirePath([[right,bottom],[left,bottom],[left,top],[right,top]]); item.closed=true; item.stroked=false; item.filled=false; item.guides=true; return item; }}
   var source=new File({imposition._jsx(source_ai)}), outputAI=new File({imposition._jsx(output_ai)}), outputPDF=new File({imposition._jsx(output_pdf)});
   if(!source.exists) throw new Error("Source AI not found: "+source.fsName);
   app.userInteractionLevel=UserInteractionLevel.DONTDISPLAYALERTS;
   var doc=app.open(source), sourceText=doc.textFrames.length, sourcePlaced=doc.placedItems.length, sourceRaster=doc.rasterItems.length, sourceGroups=doc.groupItems.length, sourceLayers=doc.layers.length;
   try {{
-    var top=topItems(doc), moves={json.dumps(movements, ensure_ascii=False)}, preserve={json.dumps(preserved)}, seen={{}};
+    var top=topItems(doc), moves={json.dumps(movements, ensure_ascii=False)}, preserve={json.dumps(preserved)}, replaceGuides={json.dumps(list(plan.get('replaceGuideItemIndexes') or []))}, seen={{}};
     if(top.length===0) throw new Error("No editable top-level Illustrator objects found");
     for(var i=0;i<moves.length;i++) {{
       var move=moves[i], item=top[Number(move.itemIndex)];
@@ -359,12 +422,14 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
       item.translate(targetLeft-Number(scaled[0]),targetTop-Number(scaled[1]));
     }}
     for(var p=0;p<preserve.length;p++) {{ var idx=Number(preserve[p]); if(!top[idx]) throw new Error("Preserved item index changed: "+idx); if(seen[String(idx)]) throw new Error("Mapped item cannot also be preserved: "+idx); seen[String(idx)]=true; }}
+    for(var oldGuide=0;oldGuide<replaceGuides.length;oldGuide++) {{ var guideIndex=Number(replaceGuides[oldGuide]); if(!top[guideIndex]) throw new Error("Source guide index changed: "+guideIndex); if(seen[String(guideIndex)]) throw new Error("Source guide cannot also be mapped: "+guideIndex); seen[String(guideIndex)]=true; }}
     for(var n=0;n<top.length;n++) if(!seen[String(n)]) throw new Error("Unmapped editable object remains: "+n);
+    for(var removeGuide=0;removeGuide<replaceGuides.length;removeGuide++) {{ unlockParents(top[Number(replaceGuides[removeGuide])]); top[Number(replaceGuides[removeGuide])].remove(); }}
 
-    var mediaW={float(media_width_pt)}, mediaH={float(media_height_pt)}, gap={float(plan['sideGapPt'])};
+    var mediaW={float(media_width_pt)}, mediaH={float(media_height_pt)}, gap={float(plan['sideGapPt'])}, boardTops={json.dumps(list(plan['artboardTops']))};
     while(doc.artboards.length<2) doc.artboards.add([0,-(doc.artboards.length)*(mediaH+gap),mediaW,-(doc.artboards.length)*(mediaH+gap)-mediaH]);
-    doc.artboards[0].artboardRect=[0,0,mediaW,-mediaH];
-    doc.artboards[1].artboardRect=[0,-(mediaH+gap),mediaW,-(mediaH+gap)-mediaH];
+    doc.artboards[0].artboardRect=[0,Number(boardTops[0]),mediaW,Number(boardTops[0])-mediaH];
+    doc.artboards[1].artboardRect=[0,Number(boardTops[1]),mediaW,Number(boardTops[1])-mediaH];
     for(var removeIndex=doc.artboards.length-1;removeIndex>=2;removeIndex--) doc.artboards.remove(removeIndex);
     doc.artboards[0].name="FIVE-FOLD-OUTSIDE"; doc.artboards[1].name="FIVE-FOLD-INSIDE";
 
@@ -389,11 +454,18 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
       metricParts.push('{{"targetArtboard":'+panelMetric.targetArtboard+',"targetPanel":'+panelMetric.targetPanel+',"topBlankPt":'+topBlank+',"bottomBlankPt":'+bottomBlank+',"verticalFillExpected":'+(panelMetric.verticalFillExpected?'true':'false')+'}}');
     }}
 
+    var guides=doc.layers.add(); guides.name="FIVE_FOLD_GUIDES"; guides.printable=true; guides.visible=true;
+    var guideCount=0;
+    for(var guideSide=0;guideSide<2;guideSide++) {{
+      var guideTop=Number(boardTops[guideSide])-{trim_top_pt}, guideBottom=guideTop-{panel_height_pt};
+      for(var guidePanel=0;guidePanel<5;guidePanel++) {{ var guideLeft={trim_left_pt}+guidePanel*{panel_width_pt}; guideRect(guides,guideLeft,guideTop,guideLeft+{panel_width_pt},guideBottom); guideCount++; }}
+    }}
+
     var marks=doc.layers.add(); marks.name="FIVE_FOLD_PRINT_MARKS"; marks.printable=true;
     var markColor=new CMYKColor(); markColor.cyan=0; markColor.magenta=0; markColor.yellow=0; markColor.black=100;
     var trimLeft={trim_left_pt}, trimTop={trim_top_pt}, panelW={panel_width_pt}, panelH={panel_height_pt}, markLength={mark_length_pt}, markGap={mark_gap_pt}, markCount=0;
     for(var side=0;side<2;side++) {{
-      var boardTop=-side*(mediaH+gap), topY=boardTop-trimTop, bottomY=topY-panelH;
+      var boardTop=Number(boardTops[side]), topY=boardTop-trimTop, bottomY=topY-panelH;
       for(var boundary=0;boundary<=5;boundary++) {{
         var x=trimLeft+boundary*panelW;
         line(marks,x,topY+markGap+markLength,x,topY+markGap); line(marks,x,bottomY-markGap,x,bottomY-markGap-markLength); markCount+=2;
@@ -407,8 +479,8 @@ def build_layout_jsx(source_ai: Path, output_ai: Path, output_pdf: Path, qa_path
     try {{ pdfOptions.saveMultipleArtboards=true; pdfOptions.artboardRange="1-2"; pdfOptions.bleedOffsetRect=[0,0,0,0]; pdfOptions.bleedLink=false; }} catch(pdfError) {{}}
     try {{ pdfOptions.trimMarks=false; pdfOptions.registrationMarks=false; pdfOptions.colorBars=false; pdfOptions.pageInformation=false; }} catch(markError) {{}}
     doc.saveAs(outputPDF,pdfOptions);
-    var outputTop=topItems(doc).length, editable=(doc.artboards.length===2&&outputTop===top.length+markCount&&doc.textFrames.length===sourceText&&doc.placedItems.length===sourcePlaced&&doc.rasterItems.length===sourceRaster&&doc.groupItems.length===sourceGroups&&doc.layers.length===sourceLayers+1);
-    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"FIVE_FOLD","artboardCount":'+doc.artboards.length+',"panelCountPerSide":5,"mediaWidthPt":'+mediaW+',"mediaHeightPt":'+mediaH+',"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPanelItemIndexes":['+outOfPanel.join(',')+'],"panelContentMetrics":['+metricParts.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"outputTopLevelItems":'+outputTop+',"printMarkCount":'+markCount+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
+    var outputTop=topItems(doc).length, editable=(doc.artboards.length===2&&outputTop===top.length-replaceGuides.length+markCount+guideCount&&doc.textFrames.length===sourceText&&doc.placedItems.length===sourcePlaced&&doc.rasterItems.length===sourceRaster&&doc.groupItems.length===sourceGroups&&doc.layers.length===sourceLayers+2);
+    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"FIVE_FOLD","artboardCount":'+doc.artboards.length+',"panelCountPerSide":5,"mediaWidthPt":'+mediaW+',"mediaHeightPt":'+mediaH+',"artboardGapPt":'+gap+',"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPanelItemIndexes":['+outOfPanel.join(',')+'],"panelContentMetrics":['+metricParts.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"replacedSourceGuideCount":'+replaceGuides.length+',"guideRectangleCount":'+guideCount+',"outputTopLevelItems":'+outputTop+',"printMarkCount":'+markCount+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
   }} finally {{ doc.close(SaveOptions.DONOTSAVECHANGES); }}
 }}());
 '''
@@ -424,6 +496,19 @@ def validate_qa(qa: Mapping[str, Any], geometry: Mapping[str, Any]) -> list[dict
         issues.append(imposition.blocking_issue("text_overflow", f"五折页存在溢出文本框：{qa['oversetTextFrameIndexes']}", "请编辑内容或调整面板语义重排规则；不得继续缩小低于最小正文字号"))
     if qa.get("outOfPanelItemIndexes"):
         issues.append(imposition.blocking_issue("panel_bounds_violation", f"五折页对象超出所属成品面板：{qa['outOfPanelItemIndexes']}", "请调整面板映射或执行语义重排，避免内容跨越裁切线或折线"))
+    if int(qa.get("guideRectangleCount") or 0) != 10:
+        issues.append(imposition.blocking_issue(
+            "reference_guides_invalid",
+            "五折页必须包含与参考模板一致的 10 个闭合面板参考线矩形",
+            "请移除 A4 源参考线，并按每面 5 个面板重新生成 Illustrator guides",
+        ))
+    expected_gap = mm_to_pt(geometry["artboardGap"])
+    if abs(float(qa.get("artboardGapPt") or 0) - expected_gap) > 0.1:
+        issues.append(imposition.blocking_issue(
+            "reference_guides_invalid",
+            "五折页两画板间距与参考模板不一致",
+            "请恢复 31 mm 画板间距后重新生成",
+        ))
     excessive_blank = [
         f"{int(item.get('targetArtboard', -1))}:{int(item.get('targetPanel', -1))}"
         for item in qa.get("panelContentMetrics") or []

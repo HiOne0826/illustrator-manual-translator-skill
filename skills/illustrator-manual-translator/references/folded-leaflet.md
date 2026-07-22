@@ -11,12 +11,16 @@ The five-fold output is an alternative to AB/A/B booklet imposition. Do not run 
 - Vertical trim margins: `9.19 mm` on each side.
 - Finished panel size: `76 × 156.22 mm`.
 - Dense reference panels keep about `5.8 mm` above and `3.7 mm` below live content inside the finished panel.
+- The two Illustrator artboards keep the reference `31 mm` canvas gap; outside is artboard 1 below, inside is artboard 2 above.
+- Replace source A4 guides with ten closed Illustrator guide rectangles (`guides=true`), one exact `76 × 156.22 mm` rectangle per panel.
 - Crop and fold marks are native Illustrator paths inside the media box.
 - PDF bleed is zero; `MediaBox == CropBox == BleedBox == TrimBox`.
 
 ## Plan file
 
 The plan must define all ten target panels and every source half-page exactly once. A missing `sourceArtboard` marks an intentionally blank target panel.
+
+When the source has fewer logical panels than the target, one source half-page may be partitioned with contiguous normalized `sourceBand: [start, end]` ranges. Bands for that half-page must cover `0` through `1` without gaps or overlap. A split boundary must fall between native objects; the run blocks if any object crosses it. This moves complete editable sections into additional panels without duplicating or inventing content.
 
 ```json
 {
@@ -70,8 +74,10 @@ python3 scripts/manual_workflow.py confirm-five-fold \
 
 - Source object outside an artboard or crossing the A4 centerline.
 - Duplicate or missing source half-page assignment.
+- Overlapping/gapped `sourceBand` ranges or a native object crossing a semantic band boundary.
 - More than ten source half-pages without an editorial reflow plan.
 - Output other than two artboards or five panels per side.
+- Missing reference guide rectangles, retained A4 source guides, or artboard-gap drift from `31 mm`.
 - Media size drift from `390 × 174.6 mm`.
 - Font size below the configured minimum or overset text after correction.
 - Loss of editable text, vectors, placed images, raster images, groups, or layers.
