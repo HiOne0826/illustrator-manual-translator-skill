@@ -106,6 +106,21 @@ class ImpositionWorkflowGateTests(unittest.TestCase):
         args = workflow.build_parser().parse_args(["confirm-a-b", "--project", "/tmp/example"])
         self.assertFalse(args.no_delivery_package)
 
+    def test_five_fold_commands_are_explicit_alternative_print_path(self) -> None:
+        args = workflow.build_parser().parse_args([
+            "impose-five-fold", "--project", "/tmp/example", "--plan", "/tmp/plan.json", "--no-execute",
+        ])
+        self.assertEqual(args.command, "impose-five-fold")
+        self.assertEqual(args.plan, "/tmp/plan.json")
+        self.assertTrue(args.no_execute)
+        confirm = workflow.build_parser().parse_args(["confirm-five-fold", "--project", "/tmp/example"])
+        self.assertEqual(confirm.command, "confirm-five-fold")
+
+    def test_five_fold_runtime_is_bundled_and_versioned(self) -> None:
+        module = workflow.folded_leaflet_import()
+        self.assertEqual(module.SCHEMA, "illustrator-folded-leaflet/1.0")
+        self.assertEqual(workflow.current_folded_leaflet_runtime_sha256(), workflow.sha256(Path(module.__file__)))
+
     def test_bundled_product_slots_keep_template_when_empty(self) -> None:
         profile = json.loads((ROOT / "skills/illustrator-manual-translator/assets/template-profiles/aeolus-ft802led/layout-rules.v1.json").read_text(encoding="utf-8"))
         product_slots = [item for item in profile["visualSlots"] if item["role"] not in {"brand-logo"}]
@@ -196,6 +211,7 @@ class ImpositionWorkflowGateTests(unittest.TestCase):
             "electronicConfirmedAt", "electronicManifestPath", "abImpositionResultsPath",
             "abConfirmedAt", "confirmedAbManifestPath", "splitResultsPath",
             "aBConfirmedAt", "confirmedABSplitManifestPath", "impositionManifestPath",
+            "foldedLeafletResultsPath", "foldedLeafletConfirmedAt", "foldedLeafletManifestPath", "printVariant",
             "deliveryPackageGenerated", "deliveryManifestPath", "deliveredAt",
         )}
         workflow.invalidate_downstream_state(state)

@@ -140,6 +140,32 @@ python3 scripts/manual_workflow.py confirm-layout --project "/path/to/customer-p
 
 This freezes the Chinese and every target-language electronic AI/PDF. It does not finish delivery.
 
+At this point choose one print path for the project:
+
+- Booklet: continue with `impose-ab`, `confirm-ab`, `split-a-b`, and `confirm-a-b`.
+- Five-fold leaflet: provide an explicit ten-panel plan and continue with `impose-five-fold` and `confirm-five-fold`.
+
+## 5A. Generate And Confirm Five-Fold Leaflets
+
+Read `references/folded-leaflet.md` first. The plan must map every electronic half-page exactly once into the ten outside/inside panels and must confirm the printer's duplex flip direction.
+
+```bash
+python3 scripts/manual_workflow.py impose-five-fold \
+  --project "/path/to/customer-project" \
+  --plan "/path/to/five-fold-plan.json"
+```
+
+The module writes native editable AI/PDF, a two-page preview, a folded-leaflet manifest, and QA for every language. It blocks on ambiguous source objects, missing panel assignments, font size below the configured minimum, overset text, geometry drift, non-zero bleed, lost editability, or an unconfirmed duplex flip direction.
+
+Show both sides of every language. Stop until the user explicitly confirms the five-fold layout.
+
+```bash
+python3 scripts/manual_workflow.py confirm-five-fold \
+  --project "/path/to/customer-project"
+```
+
+This verifies persisted hashes and creates the final electronic + five-fold delivery package. Do not continue into AB/A/B after choosing this path unless the customer explicitly requests a second print variant.
+
 ## 6. Generate And Confirm AB Editions
 
 ```bash

@@ -31,6 +31,8 @@ Run the customer workflow through files and chat. Do not start or require the re
 - Block imposition when an object crosses the centerline, a page is unrecognized, or a page number is duplicated. Return an actionable `userAction`; do not guess.
 - Validate missing/duplicate pages, left/right order, the exact A+B partition of AB, page size, zero bleed, PDF page count, and Illustrator artboard count.
 - Use the fixed print contract: short-edge flip, 100% actual size, centered, no scaling or shrink-to-fit, and zero bleed.
+- Treat five-fold output as an explicit alternative print path after electronic confirmation. Require a ten-panel mapping and confirmed duplex flip direction; never infer the fold order from page numbers or visual proximity.
+- Five-fold AI/PDF must preserve native editable objects, use two `390 × 174.6 mm` artboards with five `76 × 156.22 mm` finished panels per side, keep body text at or above the configured minimum, and block on overset text.
 - `confirm-a-b` generates the complete delivery package by default on every run. Only when the user explicitly declines the package for that specific run may you add `--no-delivery-package`; the exception is not a saved preference for later projects or reruns.
 
 ## Project Command
@@ -110,6 +112,8 @@ After Chinese confirmation, append the `图片与视觉资产` Sheet and wait fo
 
 After image confirmation, `render-source-chinese` is mandatory. Show the Chinese proof and wait for explicit layout confirmation before running `confirm-source-chinese-layout`; only that command creates the translation-generation input. After translation confirmation, run `render` for target languages and show their proofs. `confirm-layout` freezes all electronic editions and advances to `impose-ab`; it does not deliver. After every AB edition is explicitly confirmed, run `confirm-ab`, then `split-a-b`. Only after every A/B edition is explicitly confirmed may `confirm-a-b` create final delivery. All render and imposition phases verify persisted confirmations and hashes.
 
+For a customer-confirmed five-fold leaflet, use `impose-five-fold --plan ...` instead of `impose-ab`. The plan must map every source half-page exactly once into ten outside/inside panels and explicitly confirm `long-edge` or `short-edge` duplex printing. Show the two-page proofs and wait for explicit confirmation before `confirm-five-fold` creates delivery. Native-fit conversion is only the baseline; any text overflow or readability failure requires panel-level semantic reflow rather than further shrinking.
+
 For generated live titles that replace outlined template text, always prefer the current render item's language-specific font over the template's original font. Keep the title above its title-bar artwork, align the visible glyph bounds to the bottom of the title bar with the configured bottom inset, and repeat the same visible title, font, and bottom alignment on every continuation artboard. A generated TextFrame without visible glyphs or without the required bottom alignment is a layout failure.
 
 Use `--no-execute` only to inspect generated JSX. A dry run must not advance the project to layout confirmation.
@@ -126,3 +130,4 @@ The bundled `assets/template-profiles/aeolus-ft802led/layout-rules.v1.json` prof
 - `references/visual-assets.md`: semantic image slots, DPI rules, and asset replacement behavior.
 - `references/limitations.md`: Illustrator, font, outlined-text, and template risks.
 - `references/imposition.md`: exact physical-page AB/A/B ordering, rejection recovery, validation, and optional no-package completion. Read it before any imposition command.
+- `references/folded-leaflet.md`: five-panel geometry, mapping plan, native-object layout, print-direction gate, and QA contract. Read it before `impose-five-fold` or `confirm-five-fold`.
