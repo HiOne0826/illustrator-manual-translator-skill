@@ -133,7 +133,7 @@ class ImpositionWorkflowGateTests(unittest.TestCase):
 
     def test_small_format_runtime_is_bundled_and_versioned(self) -> None:
         module = workflow.small_format_import()
-        self.assertEqual(module.SCHEMA, "illustrator-small-format/1.0")
+        self.assertEqual(module.SCHEMA, "illustrator-small-format/2.0")
         self.assertEqual(workflow.SMALL_FORMAT_QA_CONTRACT_VERSION, module.QA_CONTRACT_VERSION)
         self.assertEqual(workflow.current_small_format_runtime_sha256(), workflow.sha256(Path(module.__file__)))
 

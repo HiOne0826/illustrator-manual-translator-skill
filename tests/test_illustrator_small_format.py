@@ -51,7 +51,11 @@ class SmallFormatTests(unittest.TestCase):
     def test_page_count_is_content_driven_not_fixed_to_ten(self):
         plan = small.build_plan(inventory())
         self.assertEqual(plan["sourceHalfPageCount"], 4)
-        self.assertEqual(plan["pageCount"], 3)
+        self.assertEqual(plan["contentPageCount"], 3)
+        self.assertEqual(plan["pageCount"], 4)
+        self.assertEqual(plan["blankPageCount"], 1)
+        self.assertEqual(plan["rowCount"], 2)
+        self.assertEqual(plan["columnCount"], 2)
         self.assertNotEqual(plan["pageCount"], 10)
 
     def test_consecutive_sparse_half_can_share_a_small_page(self):
@@ -72,21 +76,46 @@ class SmallFormatTests(unittest.TestCase):
         }
         self.assertEqual(len(target_pages), 1)
 
-    def test_layout_uses_variable_small_artboards_without_fold_guides(self):
+    def test_layout_uses_two_horizontal_rows_and_template_panel_guides(self):
         plan = small.build_plan(inventory())
+        self.assertEqual(plan["artboardCount"], 2)
+        self.assertEqual(len(plan["artboards"]), 2)
+        self.assertEqual(len(plan["panelRects"]), 4)
+        self.assertTrue(plan["pages"][-1]["blank"])
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             jsx = small.build_layout_jsx(root / "source.ai", root / "out.ai", root / "out.pdf", root / "qa.json", plan)
-        self.assertIn("SMALL-PAGE-", jsx)
+        self.assertIn("SMALL-FORMAT-ROW-1", jsx)
+        self.assertIn("SMALL_FORMAT_GUIDES", jsx)
+        self.assertIn('pdfOptions.artboardRange="1-2"', jsx)
         self.assertIn('"variant":"SMALL_FORMAT"', jsx)
         self.assertNotIn("FIVE_FOLD_GUIDES", jsx)
         self.assertNotIn("FIVE_FOLD_PRINT_MARKS", jsx)
         self.assertIn("pdfOptions.preserveEditability=true", jsx)
 
+    def test_sheet_geometry_matches_reference_template_margins(self):
+        plan = small.build_plan(inventory())
+        self.assertAlmostEqual(plan["sheetHeightPt"], small.mm_to_pt(174.6), places=2)
+        self.assertAlmostEqual(plan["artboards"][1]["rect"][1] - plan["artboards"][0]["rect"][1], small.mm_to_pt(205.6), places=2)
+        first = plan["panelRects"][0]
+        self.assertAlmostEqual(first[0], small.mm_to_pt(5), places=2)
+        self.assertAlmostEqual(first[1], -small.mm_to_pt(9.19), places=2)
+        self.assertEqual(plan["pages"][0]["artboardIndex"], 1)
+        self.assertEqual(plan["pages"][-1]["artboardIndex"], 0)
+
     def test_qa_blocks_overflow_bounds_and_editability_loss(self):
         plan = small.build_plan(inventory())
         issues = small.validate_qa({
-            "artboardCount": plan["pageCount"],
+            "artboardCount": 2,
+            "artboard0TopPt": plan["artboards"][0]["rect"][1],
+            "artboard1TopPt": plan["artboards"][1]["rect"][1],
+            "artboardTopDeltaPt": plan["artboards"][1]["rect"][1] - plan["artboards"][0]["rect"][1],
+            "rowCount": 2,
+            "columnCount": plan["columnCount"],
+            "pageCount": plan["pageCount"],
+            "guideRectangleCount": plan["pageCount"],
+            "sheetWidthPt": plan["sheetWidthPt"],
+            "sheetHeightPt": plan["sheetHeightPt"],
             "pageWidthPt": small.mm_to_pt(76),
             "pageHeightPt": small.mm_to_pt(156.22),
             "editableObjectsPreserved": False,

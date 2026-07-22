@@ -26,7 +26,7 @@ SCHEMA = "illustrator-manual-project/1.0"
 WORKBOOK_NAME = "说明书内容确认.xlsx"
 IMPOSITION_QA_CONTRACT_VERSION = 2
 FOLDED_LEAFLET_QA_CONTRACT_VERSION = 5
-SMALL_FORMAT_QA_CONTRACT_VERSION = 1
+SMALL_FORMAT_QA_CONTRACT_VERSION = 2
 REVIEW_META_PATTERN = re.compile(
     r"(?:请(?:客户)?确认|待确认|需要确认|需确认|please\s+confirm|needs?\s+confirmation|\bTODO\b|\bTBD\b)",
     re.IGNORECASE,
@@ -1717,7 +1717,7 @@ def _verified_small_format_artifacts(result: dict[str, Any], allowed_root: Path)
             raise WorkflowError(f"小版面产物在确认后发生变化：{source.name}")
         if item.get("type") == "imposition_qa":
             qa = read_json(source)
-            if qa.get("schema") != "illustrator-small-format/1.0" or int(qa.get("qaContractVersion") or 0) != SMALL_FORMAT_QA_CONTRACT_VERSION:
+            if qa.get("schema") != "illustrator-small-format/2.0" or int(qa.get("qaContractVersion") or 0) != SMALL_FORMAT_QA_CONTRACT_VERSION:
                 raise WorkflowError("小版面 QA 文件不符合当前契约")
             if not qa.get("editableObjectsPreserved"):
                 raise WorkflowError("小版面 QA 未证明可编辑对象得到保留")

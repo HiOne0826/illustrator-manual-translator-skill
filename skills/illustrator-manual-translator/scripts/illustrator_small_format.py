@@ -12,9 +12,9 @@ import illustrator_imposition as imposition
 import illustrator_worker
 
 
-SCHEMA = "illustrator-small-format/1.0"
-PLAN_SCHEMA = "small-format-plan/1.0"
-QA_CONTRACT_VERSION = 1
+SCHEMA = "illustrator-small-format/2.0"
+PLAN_SCHEMA = "small-format-plan/2.0"
+QA_CONTRACT_VERSION = 2
 DEFAULT_GEOMETRY_MM = {
     "pageWidth": 76.0,
     "pageHeight": 156.22,
@@ -23,6 +23,8 @@ DEFAULT_GEOMETRY_MM = {
     "contentBottomInset": 3.7,
     "sectionGap": 4.0,
     "artboardGap": 31.0,
+    "sheetMarginHorizontal": 5.0,
+    "sheetMarginVertical": 9.19,
 }
 
 
@@ -148,13 +150,37 @@ def build_plan(
     bottom_inset = mm_to_pt(normalized["contentBottomInset"])
     section_gap = mm_to_pt(normalized["sectionGap"])
     artboard_gap = mm_to_pt(normalized["artboardGap"])
-    artboards: list[dict[str, Any]] = []
+    content_page_count = len(pages)
+    page_count = content_page_count + (content_page_count % 2)
+    columns = page_count // 2
+    sheet_margin_x = mm_to_pt(normalized["sheetMarginHorizontal"])
+    sheet_margin_y = mm_to_pt(normalized["sheetMarginVertical"])
+    sheet_width = page_width * columns + sheet_margin_x * 2
+    sheet_height = page_height + sheet_margin_y * 2
+    artboards = [
+        {
+            "index": 0,
+            "name": "SMALL-FORMAT-ROW-2",
+            "rect": [0.0, -(sheet_height + artboard_gap), sheet_width, -(sheet_height + artboard_gap) - sheet_height],
+        },
+        {"index": 1, "name": "SMALL-FORMAT-ROW-1", "rect": [0.0, 0.0, sheet_width, -sheet_height]},
+    ]
+    panel_rects: list[list[float]] = []
     movements: list[dict[str, Any]] = []
     page_manifest: list[dict[str, Any]] = []
-    for page_index, page_slots in enumerate(pages):
-        page_top = -page_index * (page_height + artboard_gap)
-        page_rect = [0.0, page_top, page_width, page_top - page_height]
-        artboards.append({"index": page_index, "name": f"SMALL-PAGE-{page_index + 1:02d}", "rect": page_rect})
+    for page_index in range(page_count):
+        row_index = page_index // columns
+        column_index = page_index % columns
+        target_artboard = 1 - row_index
+        board = artboards[target_artboard]
+        page_left = sheet_margin_x + column_index * page_width
+        page_top = float(board["rect"][1]) - sheet_margin_y
+        page_rect = [page_left, page_top, page_left + page_width, page_top - page_height]
+        panel_rects.append(page_rect)
+        if page_index >= content_page_count:
+            page_manifest.append({"pageIndex": page_index, "row": row_index, "column": column_index, "artboardIndex": target_artboard, "blank": True, "sources": []})
+            continue
+        page_slots = pages[page_index]
         cursor_top = page_top - top_inset
         source_refs: list[dict[str, Any]] = []
         for slot_index, slot in enumerate(page_slots):
@@ -170,9 +196,9 @@ def build_plan(
                 for item_index in group:
                     movements.append({
                         "itemIndex": item_index,
-                        "targetArtboard": page_index,
+                        "targetArtboard": target_artboard,
                         "sourceRect": source_rect,
-                        "fitRect": [0.0, page_top, page_width, page_top - (source_rect[1] - source_rect[3]) * scale],
+                        "fitRect": [page_left, page_top, page_left + page_width, page_top - (source_rect[1] - source_rect[3]) * scale],
                         "targetPageRect": page_rect,
                         "scale": scale,
                         "verticalShiftPt": shift,
@@ -187,16 +213,16 @@ def build_plan(
                 for item_index in footer_indexes:
                     movements.append({
                         "itemIndex": item_index,
-                        "targetArtboard": page_index,
+                        "targetArtboard": target_artboard,
                         "sourceRect": source_rect,
-                        "fitRect": [0.0, page_top, page_width, page_top - (source_rect[1] - source_rect[3]) * scale],
+                        "fitRect": [page_left, page_top, page_left + page_width, page_top - (source_rect[1] - source_rect[3]) * scale],
                         "targetPageRect": page_rect,
                         "scale": scale,
                         "verticalShiftPt": footer_shift,
                     })
             if slot_index + 1 < len(page_slots):
                 cursor_top -= section_gap
-        page_manifest.append({"pageIndex": page_index, "sources": source_refs})
+        page_manifest.append({"pageIndex": page_index, "row": row_index, "column": column_index, "artboardIndex": target_artboard, "blank": False, "sources": source_refs})
     mapped = {int(item["itemIndex"]) for item in movements}
     preserved = {int(value) for value in inventory.get("preservedItemIndexes") or []}
     source_guides = {
@@ -214,9 +240,17 @@ def build_plan(
     return {
         "schema": PLAN_SCHEMA,
         "geometryMm": normalized,
-        "pageCount": len(artboards),
+        "contentPageCount": content_page_count,
+        "pageCount": page_count,
+        "blankPageCount": page_count - content_page_count,
+        "rowCount": 2,
+        "columnCount": columns,
+        "artboardCount": 2,
+        "sheetWidthPt": sheet_width,
+        "sheetHeightPt": sheet_height,
         "sourceHalfPageCount": len(slots),
         "artboards": artboards,
+        "panelRects": panel_rects,
         "pages": page_manifest,
         "movements": movements,
         "preserveItemIndexes": sorted(preserved - source_guides),
@@ -232,6 +266,7 @@ def build_layout_jsx(
     preserved = list(plan["preserveItemIndexes"])
     guides = list(plan["replaceGuideItemIndexes"])
     artboards = list(plan["artboards"])
+    panel_rects = list(plan["panelRects"])
     minimum_font = float(geometry["minimumBodyFontPt"])
     return fr'''#target illustrator
 (function () {{
@@ -243,7 +278,7 @@ def build_layout_jsx(
   app.userInteractionLevel=UserInteractionLevel.DONTDISPLAYALERTS;
   var doc=app.open(source), sourceText=doc.textFrames.length, sourcePlaced=doc.placedItems.length, sourceRaster=doc.rasterItems.length, sourceGroups=doc.groupItems.length, sourceLayers=doc.layers.length;
   try {{
-    var top=topItems(doc), moves={json.dumps(movements, ensure_ascii=False)}, preserve={json.dumps(preserved)}, replaceGuides={json.dumps(guides)}, boards={json.dumps(artboards, ensure_ascii=False)}, seen={{}};
+    var top=topItems(doc), moves={json.dumps(movements, ensure_ascii=False)}, preserve={json.dumps(preserved)}, replaceGuides={json.dumps(guides)}, boards={json.dumps(artboards, ensure_ascii=False)}, panelRects={json.dumps(panel_rects)}, seen={{}};
     for(var i=0;i<moves.length;i++) {{
       var move=moves[i], item=top[Number(move.itemIndex)];
       if(!item) throw new Error("Top-level item index changed: "+move.itemIndex);
@@ -265,6 +300,12 @@ def build_layout_jsx(
     for(var a=0;a<boards.length;a++) {{ doc.artboards[a].artboardRect=boards[a].rect; doc.artboards[a].name=boards[a].name; }}
     for(var removeIndex=doc.artboards.length-1;removeIndex>=boards.length;removeIndex--) doc.artboards.remove(removeIndex);
 
+    var guideLayer=doc.layers.add(); guideLayer.name="SMALL_FORMAT_GUIDES"; guideLayer.printable=false; var guideCount=0;
+    for(var panelIndex=0;panelIndex<panelRects.length;panelIndex++) {{
+      var panel=panelRects[panelIndex], guide=guideLayer.pathItems.rectangle(Number(panel[1]),Number(panel[0]),Number(panel[2])-Number(panel[0]),Number(panel[1])-Number(panel[3]));
+      guide.stroked=false; guide.filled=false; guide.guides=true; guide.name="SMALL-PAGE-"+(panelIndex+1); guideCount++;
+    }}
+
     var minFont={minimum_font}, raisedFonts=0, overset=[];
     for(var t=0;t<doc.textFrames.length;t++) {{
       var frame=doc.textFrames[t], attrs=frame.textRange.characterAttributes, size=0;
@@ -279,11 +320,11 @@ def build_layout_jsx(
     }}
     var aiOptions=new IllustratorSaveOptions(); aiOptions.pdfCompatible=true; doc.saveAs(outputAI,aiOptions);
     var pdfOptions=new PDFSaveOptions(); pdfOptions.preserveEditability=true; pdfOptions.viewAfterSaving=false;
-    try {{ pdfOptions.saveMultipleArtboards=true; pdfOptions.artboardRange="1-"+boards.length; pdfOptions.bleedOffsetRect=[0,0,0,0]; pdfOptions.bleedLink=false; }} catch(pdfError) {{}}
+    try {{ pdfOptions.saveMultipleArtboards=true; pdfOptions.artboardRange="1-2"; pdfOptions.bleedOffsetRect=[0,0,0,0]; pdfOptions.bleedLink=false; }} catch(pdfError) {{}}
     try {{ pdfOptions.trimMarks=false; pdfOptions.registrationMarks=false; pdfOptions.colorBars=false; pdfOptions.pageInformation=false; }} catch(markError) {{}}
     doc.saveAs(outputPDF,pdfOptions);
-    var outputTop=topItems(doc).length, editable=(doc.artboards.length===boards.length&&outputTop===top.length-replaceGuides.length&&doc.textFrames.length===sourceText&&doc.placedItems.length===sourcePlaced&&doc.rasterItems.length===sourceRaster&&doc.groupItems.length===sourceGroups&&doc.layers.length===sourceLayers);
-    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"SMALL_FORMAT","artboardCount":'+doc.artboards.length+',"pageCount":'+boards.length+',"pageWidthPt":{mm_to_pt(geometry['pageWidth'])},"pageHeightPt":{mm_to_pt(geometry['pageHeight'])},"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPageItemIndexes":['+outOfPage.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"replacedSourceGuideCount":'+replaceGuides.length+',"outputTopLevelItems":'+outputTop+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
+    var outputTop=topItems(doc).length, board0=doc.artboards[0].artboardRect, board1=doc.artboards[1].artboardRect, editable=(doc.artboards.length===2&&outputTop===top.length-replaceGuides.length+guideCount&&doc.textFrames.length===sourceText&&doc.placedItems.length===sourcePlaced&&doc.rasterItems.length===sourceRaster&&doc.groupItems.length===sourceGroups&&doc.layers.length===sourceLayers+1);
+    write({imposition._jsx(qa_path)}, '{{"schema":"{SCHEMA}","qaContractVersion":{QA_CONTRACT_VERSION},"variant":"SMALL_FORMAT","artboardCount":'+doc.artboards.length+',"artboard0TopPt":'+Number(board0[1])+',"artboard1TopPt":'+Number(board1[1])+',"artboardTopDeltaPt":'+(Number(board1[1])-Number(board0[1]))+',"rowCount":2,"columnCount":{int(plan['columnCount'])},"contentPageCount":{int(plan['contentPageCount'])},"pageCount":{int(plan['pageCount'])},"blankPageCount":{int(plan['blankPageCount'])},"guideRectangleCount":'+guideCount+',"sheetWidthPt":{float(plan['sheetWidthPt'])},"sheetHeightPt":{float(plan['sheetHeightPt'])},"pageWidthPt":{mm_to_pt(geometry['pageWidth'])},"pageHeightPt":{mm_to_pt(geometry['pageHeight'])},"minimumBodyFontPt":'+minFont+',"raisedFontFrameCount":'+raisedFonts+',"oversetTextFrameIndexes":['+overset.join(',')+'],"outOfPageItemIndexes":['+outOfPage.join(',')+'],"sourceTopLevelItems":'+top.length+',"mappedTopLevelItems":'+moves.length+',"preservedTopLevelItems":'+preserve.length+',"replacedSourceGuideCount":'+replaceGuides.length+',"outputTopLevelItems":'+outputTop+',"editableObjectsPreserved":'+(editable?'true':'false')+',"bleedPt":0}}');
   }} finally {{ doc.close(SaveOptions.DONOTSAVECHANGES); }}
 }}());
 '''
@@ -291,8 +332,17 @@ def build_layout_jsx(
 
 def validate_qa(qa: Mapping[str, Any], plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    if int(qa.get("artboardCount") or 0) != int(plan["pageCount"]):
-        issues.append(imposition.blocking_issue("artboard_count_mismatch", "小版面画板数与自动分页计划不一致", "请重新运行小版面自动分页"))
+    if int(qa.get("artboardCount") or 0) != 2 or int(qa.get("rowCount") or 0) != 2:
+        issues.append(imposition.blocking_issue("row_layout_mismatch", "小版面必须输出为上下两个横向画板", "请按模板恢复上下两行横向排列"))
+    expected_top_delta = float(plan["sheetHeightPt"]) + mm_to_pt(plan["geometryMm"]["artboardGap"])
+    if float(qa.get("artboard0TopPt") or 0) >= float(qa.get("artboard1TopPt") or 0) or abs(float(qa.get("artboardTopDeltaPt") or 0) - expected_top_delta) > 0.1:
+        issues.append(imposition.blocking_issue("artboard_order_mismatch", "画板顺序或上下行间距与模板不一致", "请保持下行为画板 1、上行为画板 2，并使用 31 mm 行间距"))
+    if int(qa.get("pageCount") or 0) != int(plan["pageCount"]) or int(plan["pageCount"]) % 2:
+        issues.append(imposition.blocking_issue("odd_page_count", "小版面页数必须为偶数", "请在末尾补一个无内容空白页后重新拼版"))
+    if int(qa.get("columnCount") or 0) != int(plan["columnCount"]):
+        issues.append(imposition.blocking_issue("column_count_mismatch", "上下两行的小版面列数不一致", "请确保两行使用相同横向列数"))
+    if int(qa.get("guideRectangleCount") or 0) != int(plan["pageCount"]):
+        issues.append(imposition.blocking_issue("guide_count_mismatch", "小版面参考线数量与页面数量不一致", "请为每个小页面生成一个模板尺寸参考框"))
     if not qa.get("editableObjectsPreserved"):
         issues.append(imposition.blocking_issue("editability_lost", "小版面输出的可编辑对象计数不一致", "请从电子版 AI 重新生成，不要置入整页 PDF"))
     if qa.get("oversetTextFrameIndexes"):
@@ -302,6 +352,8 @@ def validate_qa(qa: Mapping[str, Any], plan: Mapping[str, Any]) -> list[dict[str
     geometry = plan["geometryMm"]
     if abs(float(qa.get("pageWidthPt") or 0) - mm_to_pt(geometry["pageWidth"])) > 0.1 or abs(float(qa.get("pageHeightPt") or 0) - mm_to_pt(geometry["pageHeight"])) > 0.1:
         issues.append(imposition.blocking_issue("invalid_page_size", "小版面尺寸与计划不一致", "请恢复计划中的 pageWidth/pageHeight"))
+    if abs(float(qa.get("sheetWidthPt") or 0) - float(plan["sheetWidthPt"])) > 0.1 or abs(float(qa.get("sheetHeightPt") or 0) - float(plan["sheetHeightPt"])) > 0.1:
+        issues.append(imposition.blocking_issue("invalid_sheet_size", "横向画板尺寸与模板几何不一致", "请恢复模板留边和横向列宽"))
     return issues
 
 
@@ -344,8 +396,8 @@ def layout_small_format_job(job: Mapping[str, Any], *, execute: bool = True) -> 
     qa = json.loads(qa_path.read_text(encoding="utf-8-sig"))
     issues = validate_qa(qa, plan)
     pdf_meta = imposition._pdf_metadata(outputs["pdf"])
-    if pdf_meta.get("pages") != plan["pageCount"]:
-        issues.append(imposition.blocking_issue("artboard_count_mismatch", f"小版面 PDF 应为 {plan['pageCount']} 页，实际为 {pdf_meta.get('pages')}", "请确保导出全部自动分页画板", language=language))
+    if pdf_meta.get("pages") != 2:
+        issues.append(imposition.blocking_issue("artboard_count_mismatch", f"小版面 PDF 应为上下两行共 2 个横向画板，实际为 {pdf_meta.get('pages')}", "请确保导出上下两个横向画板", language=language))
     if not imposition._pdf_has_zero_bleed(pdf_meta):
         issues.append(imposition.blocking_issue("bleed_detected", "小版面 PDF 检测到非零出血", "请保持零出血并重新生成", language=language))
     manifest = {

@@ -131,5 +131,5 @@ The bundled `assets/template-profiles/aeolus-ft802led/layout-rules.v1.json` prof
 - `references/visual-assets.md`: semantic image slots, DPI rules, and asset replacement behavior.
 - `references/limitations.md`: Illustrator, font, outlined-text, and template risks.
 - `references/imposition.md`: exact physical-page AB/A/B ordering, rejection recovery, validation, and optional no-package completion. Read it before any imposition command.
-- `references/small-format.md`: variable-count small-page geometry, automatic packing, editability, and QA contract. Read it before `layout-small-format` or `confirm-small-format`.
+- `references/small-format.md`: content-driven small-page packing, mandatory even page count, reference-style two-row horizontal arrangement, editability, and QA contract. Read it before `layout-small-format` or `confirm-small-format`.
 - `references/folded-leaflet.md`: five-panel geometry, mapping plan, native-object layout, print-direction gate, and QA contract. Read it before `impose-five-fold` or `confirm-five-fold`.
