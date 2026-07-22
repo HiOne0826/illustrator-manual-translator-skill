@@ -10,7 +10,7 @@ The five-fold output is an alternative to AB/A/B booklet imposition. Do not run 
 - Horizontal trim margins: `5 mm` on each side.
 - Vertical trim margins: `9.19 mm` on each side.
 - Finished panel size: `76 × 156.22 mm`.
-- Dense reference panels commonly keep about `5.8 mm` above live content. Bottom whitespace depends on the actual content volume and must not be removed by stretching internal layout.
+- Dense reference panels commonly keep about `5.8 mm` above and `3.7 mm` below live content.
 - The two Illustrator artboards keep the reference `31 mm` canvas gap; outside is artboard 1 below, inside is artboard 2 above.
 - Replace source A4 guides with ten closed Illustrator guide rectangles (`guides=true`), one exact `76 × 156.22 mm` rectangle per panel.
 - Crop and fold marks are native Illustrator paths inside the media box.
@@ -47,9 +47,9 @@ When the source has fewer logical panels than the target, one source half-page m
 
 ## Native-object layout
 
-The implementation scales source objects uniformly to the panel width, preserves every object's relative position inside its page or semantic band, and moves the complete section by one shared offset to the reference top inset. It never spreads titles and bodies independently to fill panel height. Object dimensions remain proportional: images and text are not stretched vertically. Short sections may retain natural bottom whitespace. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
+The implementation scales source objects uniformly to the panel width, then identifies complete visual sections. A full-width filled title bar starts a section; the bar, title, corresponding body, and associated image move with one shared offset. Page-number footers form a separate block. When a panel contains multiple blocks, only those complete blocks are distributed between the reference top and bottom insets. Object dimensions and every internal section offset remain proportional: titles and bodies are never spread independently, and images or text are not stretched vertically. A panel containing only one short section may retain unavoidable bottom whitespace because the module does not duplicate or invent content. It does not place a PDF page or rasterize the source. Text below the configured `minimumBodyFontPt` is raised to the minimum and any resulting overset TextFrame is blocking.
 
-QA records `panelContentMetrics` and blocks a top-aligned section when whitespace before its first object exceeds `12 mm`. Bottom whitespace alone is not a failure because content volume varies.
+QA records `panelContentMetrics` and blocks when whitespace before the first block exceeds `12 mm`. For a panel with multiple distributable blocks it also blocks when whitespace below the last block exceeds `12 mm`. Single-section bottom whitespace is reported but cannot be rejected without a panel-level editorial remap or additional content.
 
 This native-fit mode is a technical conversion baseline, not semantic editorial reflow. If the customer requires the dense MC-230 reference style, onboard panel-level semantic rules and edit content until all overset and readability gates pass.
 
